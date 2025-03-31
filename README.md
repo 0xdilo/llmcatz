@@ -37,22 +37,19 @@ llmcatz is a lightning-fast utility that scans your codebase and creates a neat,
     sudo mv zig-out/bin/llmcatz /usr/local/bin/
 
 ## Usage
+```bash
 llmcatz [OPTIONS] [TARGETS...]
-    ```bash
-    # Interactive file selection with fzf
-    llmcatz -f
-    # Print to stdout
-    llmcatz -p src/
 
-    # Save to file
-    llmcatz -o output.txt src/
-
-    # Exclude patterns
-    llmcatz -e ".git,node_modules" src/
-
-    # Set thread count
-    llmcatz -t 8 src/
-
-    # Process specific files
-    llmcatz file1.txt file2.txt
+# Interactive file selection with fzf
+llmcatz -f
+# Print to stdout
+llmcatz -p src/
+# Save to file
+llmcatz -o output.txt src/
+# Exclude patterns
+llmcatz -e ".git,node_modules" src/
+# Set thread count
+llmcatz -t 8 src/
+# Process specific files
+llmcatz file1.txt file2.txt
 
