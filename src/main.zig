@@ -196,7 +196,7 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
         };
 
         if (stat.kind == .directory) {
-            try writer.print("{s}/\n", .{target});
+            try writer.print("{s}\n", .{target});
 
             var dir = try std.fs.cwd().openDir(target, .{ .iterate = true });
             defer dir.close();
@@ -210,7 +210,7 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
                 
                 if (!should_exclude(full_path, options.exclude.items) and 
                     !should_exclude(entry.path, options.exclude.items)) {
-                    try writer.print("{s}/{s}{s}\n", .{ target, entry.path, if (entry.kind == .directory) "/" else "" });
+                    try writer.print("{s}{s}{s}\n", .{ target, entry.path, if (entry.kind == .directory) "/" else "" });
                 }
             }
         } else {
