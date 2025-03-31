@@ -30,7 +30,7 @@ llmcatz is a lightning-fast utility that scans your codebase and creates a neat,
    ```bash
    git clone https://github.com/0xdilo/llmcatz
    cd llmcatz
-   zig build
+   zig build -Doptimize=ReleaseSmall
 
 3. Optional: Move the binary to a directory in your PATH:
     ```bash

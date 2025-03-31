@@ -37,7 +37,7 @@ const Options = struct {
 
 fn print_help() void {
     const help_text =
-        \\Usage: llmcat [OPTIONS] [TARGETS...]
+        \\Usage: llmcatz [OPTIONS] [TARGETS...]
         \\
         \\TARGETS can be:
         \\  - Files

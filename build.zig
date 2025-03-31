@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "llmcatz",
         .root_module = exe_mod,
+        .strip = true,
     });
 
     b.installArtifact(exe);
