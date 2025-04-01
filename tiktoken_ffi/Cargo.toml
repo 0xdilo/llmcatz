@@ -9,3 +9,9 @@ tiktoken-rs = "0.6.0"
 [lib]
 crate-type = ["cdylib"]
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+debug = false
