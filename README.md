@@ -31,14 +31,16 @@ A cute and powerful tool to gather files into a format perfect for LLMs and AI a
    - Zig: Follow [official instructions](https://ziglang.org/download/).
    - Rust: Install via [rustup](https://rustup.rs/).
    - `fzf`, `xclip`, or `wl-copy`: Use your package manager (e.g., `apt`, `brew`).
+
 2. **Clone and Build**:
    ```bash
    git clone https://github.com/0xdilo/llmcatz
    cd llmcatz
    ./build.sh
-The script builds both the Rust tiktoken_ffi library and the Zig binary. Optionally, install globally:
+
+3. **Optionally, install globally:**
    ```bash
-   sudo mv zig-out/bin/llmcatz /usr/local/bin/
+    sudo mv zig-out/bin/llmcatz /usr/local/bin/
 
 ## Usage
 ```bash
