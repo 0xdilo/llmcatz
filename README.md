@@ -7,34 +7,38 @@ A cute and powerful tool to gather files into a format perfect for LLMs and AI a
                 '---''(_/--'  `-'\_) 
 
 ## What is llmcatz?
-llmcatz is a lightning-fast utility that scans your codebase and creates a neat, structured output that's perfect for pasting into AI assistants like Claude, ChatGPT, or other LLMs. It automatically formats your file structure and contents in a way that helps AIs understand your project better.
+`llmcatz` is a lightning-fast utility that scans your codebase and creates a structured output optimized for AI assistants like Claude, ChatGPT, or other LLMs. It formats your file structure and contents, optionally counts tokens, and supports clipboard integration for easy pasting.
 
 ## Features
-- 🚀 Super fast: Written in Zig for maximum performance
-- 🧵 Multi-threaded: Processes files in parallel
-- 📋 Clipboard integration: Copies results directly to your clipboard
-- 🔍 Flexible targeting: Process individual files, directories, or even remote repositories (coming soon!)
-- 🙈 Exclusion patterns: Skip files you don't want to include
-- 🔎 Interactive file selection: Use fzf to pick files interactively
-- 🐱 Adorable cat ASCII art
+- 🚀 **Super Fast**: Written in Zig for maximum performance.
+- 🧵 **Multi-threaded**: Processes files in parallel (customizable thread count).
+- 📋 **Clipboard Integration**: Copies results to your clipboard (X11/Wayland).
+- 🔍 **Flexible Targeting**: Process files, directories, or (soon) remote repositories.
+- 🙈 **Exclusion Patterns**: Skip files or directories you don’t want.
+- 🔎 **Interactive Selection**: Use `fzf` to pick files interactively.
+- 🧮 **Token Counting**: Count tokens using TikToken encodings (e.g., `cl100k_base`).
+- 🐱 **Adorable ASCII Art**: Because why not?
 
 ## Dependencies
-- [Zig](https://ziglang.org/) (for building)
-- [fzf](https://github.com/junegunn/fzf) (for interactive file selection)
-- xclip or wl-copy (for clipboard support on X11 or Wayland respectively)
+- [Zig](https://ziglang.org/) (for building the main binary)
+- [Rust](https://www.rust-lang.org/) (for building the `tiktoken_ffi` library)
+- [tiktoken-rs](https://github.com/oconnor663/tiktoken-rs) (Rust library for tokenization)
+- [fzf](https://github.com/junegunn/fzf) (optional, for interactive file selection)
+- `xclip` or `wl-copy` (optional, for clipboard support on X11 or Wayland)
 
 ## Installation
-1. Ensure you have Zig, fzf, and either xclip or wl-copy installed on your system.
-
-2. Build llmcatz:
+1. **Install Dependencies**:
+   - Zig: Follow [official instructions](https://ziglang.org/download/).
+   - Rust: Install via [rustup](https://rustup.rs/).
+   - `fzf`, `xclip`, or `wl-copy`: Use your package manager (e.g., `apt`, `brew`).
+2. **Clone and Build**:
    ```bash
    git clone https://github.com/0xdilo/llmcatz
    cd llmcatz
-   zig build -Doptimize=ReleaseSmall
-
-3. Optional: Move the binary to a directory in your PATH:
-    ```bash
-    sudo mv zig-out/bin/llmcatz /usr/local/bin/
+   ./build.sh
+The script builds both the Rust tiktoken_ffi library and the Zig binary. Optionally, install globally:
+   ```bash
+   sudo mv zig-out/bin/llmcatz /usr/local/bin/
 
 ## Usage
 ```bash
@@ -52,4 +56,10 @@ llmcatz -e ".git,node_modules" src/
 llmcatz -t 8 src/
 # Process specific files
 llmcatz file1.txt file2.txt
+# Use a specific token encoding
+llmcatz --encoding o200k_base src/
+# Count total files processed
+llmcatz --count-files src/
+# Count tokens only
+llmcatz --count-tokens src/
 

@@ -1,0 +1,11 @@
+[package]
+name = "tiktoken_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tiktoken-rs = "0.6.0"
+
+[lib]
+crate-type = ["cdylib"]
+

@@ -2,13 +2,23 @@ const std = @import("std");
 const Thread = std.Thread;
 const Mutex = Thread.Mutex;
 
+const c = @cImport({
+    @cInclude("tiktoken_ffi.h");
+    @cInclude("string.h");  
+    @cInclude("stdlib.h"); 
+});
+
+
 const Options = struct {
     print: bool = false,
     output: ?[]const u8 = null,
     exclude: std.ArrayList([]const u8),
     threads: u32 = 4,
     targets: std.ArrayList([]const u8),
-    fzf_mode: bool = false, // New flag for fzf mode
+    fzf_mode: bool = false,
+    encoding: []const u8 = "cl100k_base",
+    count_files: bool = false,
+    count_tokens: bool = false,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) Options {
@@ -20,13 +30,10 @@ const Options = struct {
     }
 
     pub fn deinit(self: *Options) void {
-        // Free all allocated strings in exclude list
         for (self.exclude.items) |item| {
             self.allocator.free(item);
         }
         self.exclude.deinit();
-        
-        // Free all allocated strings in targets list
         for (self.targets.items) |item| {
             self.allocator.free(item);
         }
@@ -34,24 +41,22 @@ const Options = struct {
     }
 };
 
-
 fn print_help() void {
     const help_text =
         \\Usage: llmcatz [OPTIONS] [TARGETS...]
         \\
-        \\TARGETS can be:
-        \\  - Files
-        \\  - Directory paths
-        \\  - URLs
-        \\  - GitHub repository URLs
+        \\TARGETS can be: Files, Directory paths, URLs, GitHub repository URLs
         \\
         \\Options:
-        \\  -p, --print     Print results to stdout
-        \\  -o, --output    Specify output file
-        \\  -e, --exclude   Exclude paths or patterns (can be used multiple times)
-        \\  -t, --threads   Number of threads to use (default: 4)
-        \\  -f, --fzf       Use fzf to select files interactively
-        \\  -h, --help      Display this help message
+        \\  -p, --print         Print results to stdout
+        \\  -o, --output        Specify output file
+        \\  -e, --exclude       Exclude paths/patterns (multiple allowed)
+        \\  -t, --threads       Number of threads (default: 4)
+        \\  -f, --fzf           Use fzf to select files interactively
+        \\  --encoding         Tokenizer encoding (e.g., o200k_base, cl100k_base)
+        \\  --count-files      Print total file count
+        \\  --count-tokens     Only count tokens without saving content
+        \\  -h, --help          Display this help message
         \\
     ;
     std.debug.print("{s}", .{help_text});
@@ -59,26 +64,12 @@ fn print_help() void {
 
 fn should_exclude(path: []const u8, exclude: []const []const u8) bool {
     for (exclude) |pattern| {
-        if (std.mem.eql(u8, path, pattern)) {
-            return true;
-        }
-        
-        if (std.mem.endsWith(u8, path, pattern)) {
-            return true;
-        }
-        
-        if (std.mem.indexOf(u8, path, pattern) != null) {
-            return true;
-        }
-        
-        const dir_pattern = if (std.mem.endsWith(u8, pattern, "/")) 
-            pattern 
-        else 
-            std.fmt.allocPrint(std.heap.page_allocator, "{s}/", .{pattern}) catch pattern;
-            
-        if (std.mem.startsWith(u8, path, dir_pattern)) {
-            return true;
-        }
+        if (std.mem.eql(u8, path, pattern) or
+            std.mem.endsWith(u8, path, pattern) or
+            std.mem.indexOf(u8, path, pattern) != null) return true;
+
+        const dir_pattern = if (std.mem.endsWith(u8, pattern, "/")) pattern else std.fmt.allocPrint(std.heap.page_allocator, "{s}/", .{pattern}) catch pattern;
+        if (std.mem.startsWith(u8, path, dir_pattern)) return true;
     }
     return false;
 }
@@ -88,24 +79,14 @@ fn copy_to_clipboard(allocator: std.mem.Allocator, text: []const u8) !void {
         const wayland_cmd = &[_][]const u8{"wl-copy"};
         var wayland_child = std.process.Child.init(wayland_cmd, allocator);
         wayland_child.stdin_behavior = .Pipe;
-
-        if (wayland_child.spawn()) |_| {
-            if (wayland_child.stdin) |*stdin| {
-                stdin.writeAll(text) catch {
-                    stdin.close();
-                    wayland_child.stdin = null;
-                    return try fallback_to_xclip(allocator, text);
-                };
-                stdin.close();
-                wayland_child.stdin = null;
-            }
-
-            const term = try wayland_child.wait();
-            if (term == .Exited and term.Exited == 0) {
-                return;
-            }
-        } else |_| {}
-
+        try wayland_child.spawn();
+        if (wayland_child.stdin) |*stdin| {
+            try stdin.writeAll(text);
+            stdin.close();
+            wayland_child.stdin = null;
+        }
+        const term = try wayland_child.wait();
+        if (term == .Exited and term.Exited == 0) return;
         return try fallback_to_xclip(allocator, text);
     } else {
         return try fallback_to_xclip(allocator, text);
@@ -116,28 +97,14 @@ fn fallback_to_xclip(allocator: std.mem.Allocator, text: []const u8) !void {
     const xorg_cmd = &[_][]const u8{ "xclip", "-selection", "clipboard" };
     var xorg_child = std.process.Child.init(xorg_cmd, allocator);
     xorg_child.stdin_behavior = .Pipe;
-
-    xorg_child.spawn() catch |err| {
-        std.debug.print("Failed to spawn xclip: {any}\n", .{err});
-        return error.ClipboardFailed;
-    };
-
+    try xorg_child.spawn();
     if (xorg_child.stdin) |*stdin| {
-        std.debug.print("Writing {d} bytes to xclip...\n", .{text.len});
         try stdin.writeAll(text);
         stdin.close();
         xorg_child.stdin = null;
     }
-
     const term = try xorg_child.wait();
-    std.debug.print("xclip completed with {any}\n", .{term});
-    switch (term) {
-        .Exited => |code| if (code != 0) {
-            std.debug.print("xclip exited with non-zero code: {d}\n", .{code});
-            return error.ClipboardFailed;
-        },
-        else => return error.ClipboardFailed,
-    }
+    if (term != .Exited or term.Exited != 0) return error.ClipboardFailed;
 }
 
 const FileTask = struct {
@@ -146,49 +113,67 @@ const FileTask = struct {
     target: ?[]const u8 = null,
 };
 
+fn init_tokenizer(encoding: []const u8) !void {
+    const c_str = c.strdup(encoding.ptr) orelse return error.OutOfMemory;
+    defer c.free(c_str);
+    const result = c.tiktoken_init(c_str);
+    if (result != 0) {
+        std.debug.print("Failed to initialize tokenizer with encoding '{s}': error code {d}\n", .{encoding, result});
+        return error.TokenizerInitFailed;
+    }
+}
+
+fn count_tokens(text: []const u8) usize {
+    const c_str = c.strdup(text.ptr) orelse return 0;
+    defer c.free(c_str);
+    return c.tiktoken_count(c_str);
+}
+
 fn process_file(
     allocator: std.mem.Allocator,
     task: FileTask,
     buffer: *std.ArrayList(u8),
     mutex: *Mutex,
-    _: []const []const u8, // Unused parameter, marked with underscore
+
+    total_tokens: *usize,
 ) !void {
     var local_buffer = std.ArrayList(u8).init(allocator);
     defer local_buffer.deinit();
 
     const writer = local_buffer.writer();
-
     const full_path = if (task.is_full_path)
         try allocator.dupe(u8, task.path)
     else
         try std.fs.path.join(allocator, &[_][]const u8{ task.target.?, task.path });
     defer allocator.free(full_path);
 
-    try writer.print("[ {s} ]\n\n", .{full_path});
-
+    try writer.print("[ {s} ]\n", .{full_path});
     const content = std.fs.cwd().readFileAlloc(allocator, full_path, 10 * 1024 * 1024) catch |err| {
         try writer.print("Error reading file: {any}\n\n", .{err});
         return;
     };
     defer allocator.free(content);
 
+    const token_count = count_tokens(content);
+
     try writer.writeAll(content);
     try writer.writeAll("\n\n");
 
-    // Acquire mutex before writing to shared buffer
     mutex.lock();
     defer mutex.unlock();
     try buffer.appendSlice(local_buffer.items);
+    total_tokens.* += token_count;
 }
 
 fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
     var buffer = std.ArrayList(u8).init(allocator);
     defer buffer.deinit();
 
+    var total_tokens: usize = 0;
+    var file_count: usize = 0;
     const writer = buffer.writer();
 
     try writer.writeAll("[ DIRECTORY STRUCTURE ]\n");
-
     for (options.targets.items) |target| {
         const stat = std.fs.cwd().statFile(target) catch {
             try writer.print("{s}\n", .{target});
@@ -197,17 +182,13 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
 
         if (stat.kind == .directory) {
             try writer.print("{s}\n", .{target});
-
             var dir = try std.fs.cwd().openDir(target, .{ .iterate = true });
             defer dir.close();
-
             var walker = try dir.walk(allocator);
             defer walker.deinit();
-
             while (try walker.next()) |entry| {
                 const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{target, entry.path});
                 defer allocator.free(full_path);
-                
                 if (!should_exclude(full_path, options.exclude.items) and 
                     !should_exclude(entry.path, options.exclude.items)) {
                     try writer.print("{s}{s}{s}\n", .{ target, entry.path, if (entry.kind == .directory) "/" else "" });
@@ -217,7 +198,6 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
             try writer.print("{s}\n", .{target});
         }
     }
-
     try writer.writeAll("\n");
 
     var tasks = std.ArrayList(FileTask).init(allocator);
@@ -225,18 +205,14 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
 
     for (options.targets.items) |target| {
         const stat = std.fs.cwd().statFile(target) catch continue;
-
         if (stat.kind == .directory) {
             var dir = try std.fs.cwd().openDir(target, .{ .iterate = true });
             defer dir.close();
-
             var walker = try dir.walk(allocator);
             defer walker.deinit();
-
             while (try walker.next()) |entry| {
                 const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{target, entry.path});
                 defer allocator.free(full_path);
-                
                 if (entry.kind == .file and 
                     !should_exclude(full_path, options.exclude.items) and 
                     !should_exclude(entry.path, options.exclude.items)) {
@@ -245,6 +221,7 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
                         .is_full_path = false,
                         .target = try allocator.dupe(u8, target),
                     });
+                    file_count += 1;
                 }
             }
         } else if (stat.kind == .file) {
@@ -252,6 +229,7 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
                 .path = try allocator.dupe(u8, target),
                 .is_full_path = true,
             });
+            file_count += 1;
         }
     }
 
@@ -259,15 +237,13 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
     const thread_count = @min(options.threads, @as(u32, @intCast(tasks.items.len)));
 
     if (thread_count == 0) {
-        if (options.print) {
-            std.debug.print("{s}", .{buffer.items});
-        }
+        if (options.print) std.debug.print("{s}", .{buffer.items});
         return;
     }
 
     if (thread_count == 1 or tasks.items.len == 1) {
         for (tasks.items) |task| {
-            try process_file(allocator, task, &buffer, &mutex, options.exclude.items);
+            try process_file(allocator, task, &buffer, &mutex, &total_tokens);
             allocator.free(task.path);
             if (task.target) |t| allocator.free(t);
         }
@@ -282,7 +258,8 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
             tasks: []FileTask,
             buffer: *std.ArrayList(u8),
             mutex: *Mutex,
-            exclude: []const []const u8,
+            options: Options,
+            total_tokens: *usize,
             next_task: *std.atomic.Value(usize),
         };
 
@@ -291,7 +268,8 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
             .tasks = tasks.items,
             .buffer = &buffer,
             .mutex = &mutex,
-            .exclude = options.exclude.items,
+            .options = options,
+            .total_tokens = &total_tokens,
             .next_task = &next_task,
         };
 
@@ -300,9 +278,8 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
                 while (true) {
                     const task_index = ctx.next_task.fetchAdd(1, .monotonic);
                     if (task_index >= ctx.tasks.len) break;
-
                     const task = ctx.tasks[task_index];
-                    try process_file(ctx.allocator, task, ctx.buffer, ctx.mutex, ctx.exclude);
+                    try process_file(ctx.allocator, task, ctx.buffer, ctx.mutex, ctx.total_tokens);
                 }
             }
         }.work;
@@ -321,79 +298,76 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
         }
     }
 
+    if (options.count_tokens) {
+        std.debug.print(
+            \\
+            \\      |\      _,,,---,,_
+            \\ZZZzz /,`.-'`'    -.  ;-;;,_
+            \\     |,4-  ) )-,_. ,\ (  `'-'
+            \\    '---''(_/--'  `-'\_) 
+            \\Meow! Token count: {d}
+        , .{total_tokens});
+        if (options.count_files) {
+            std.debug.print("\nProcessed {d} files", .{file_count});
+        }
+        std.debug.print("\n", .{});
+        return;
+    }
+
     if (options.print) {
         std.debug.print("{s}", .{buffer.items});
     }
 
     if (options.output) |output_path| {
-        std.fs.cwd().writeFile(.{
-            .sub_path = output_path,
-            .data = buffer.items,
-        }) catch |err| {
-            std.debug.print("Error writing to output file: {any}\n", .{err});
-        };
+        try std.fs.cwd().writeFile(.{ .sub_path = output_path, .data = buffer.items });
         std.debug.print(
             \\
             \\      |\      _,,,---,,_
             \\ZZZzz /,`.-'`'    -.  ;-;;,_
             \\     |,4-  ) )-,_. ,\ (  `'-'
             \\    '---''(_/--'  `-'\_) 
-            \\Meow! Content successfully written to file: {s}
-        , .{output_path});
+            \\Meow! Content written to {s}
+            \\Token count: {d}
+        , .{output_path, total_tokens});
     } else if (!options.print) {
-        copy_to_clipboard(allocator, buffer.items) catch |err| {
-            std.debug.print("Failed to copy to clipboard: {any}\n", .{err});
-            return;
-        };
-        std.debug.print(
+        try copy_to_clipboard(allocator, buffer.items);
+        var recap = std.ArrayList(u8).init(allocator);
+        defer recap.deinit();
+        const recap_writer = recap.writer();
+        try recap_writer.print(
             \\
             \\      |\      _,,,---,,_
             \\ZZZzz /,`.-'`'    -.  ;-;;,_
             \\     |,4-  ) )-,_. ,\ (  `'-'
             \\    '---''(_/--'  `-'\_) 
-            \\Meow! Content successfully copied to clipboard!
-        , .{});
+            \\Meow! Content copied to clipboard!
+            \\Token count: {d}
+        , .{total_tokens});
+        if (options.count_files) {
+            try recap_writer.print("\nProcessed {d} files", .{file_count});
+        }
+        std.debug.print("{s}\n", .{recap.items});
     }
-    std.debug.print("", .{});
 }
 
 fn run_fzf(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
     var targets = std.ArrayList([]const u8).init(allocator);
-    
     var file_list = std.ArrayList([]const u8).init(allocator);
-    defer {
-        for (file_list.items) |path| {
-            allocator.free(path);
-        }
-        file_list.deinit();
-    }
+    defer { for (file_list.items) |path| allocator.free(path); file_list.deinit(); }
 
-    var dir = std.fs.cwd().openDir(".", .{ .iterate = true }) catch |err| {
-        std.debug.print("Error opening current directory: {any}\n", .{err});
-        return error.DirectoryAccessFailed;
-    };
+    var dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
     defer dir.close();
-
-    var walker = dir.walk(allocator) catch |err| {
-        std.debug.print("Error walking directory: {any}\n", .{err});
-        return error.DirectoryWalkFailed;
-    };
+    var walker = try dir.walk(allocator);
     defer walker.deinit();
-
-    while (walker.next() catch |err| {
-        std.debug.print("Error during directory traversal: {any}\n", .{err});
-        return error.DirectoryTraversalFailed;
-    }) |entry| {
+    while (try walker.next()) |entry| {
         if (entry.kind == .file) {
-            const path = try allocator.dupe(u8, entry.path);
-            try file_list.append(path);
+            try file_list.append(try allocator.dupe(u8, entry.path));
         }
     }
 
     var fzf_input = std.ArrayList(u8).init(allocator);
     defer fzf_input.deinit();
     const writer = fzf_input.writer();
-    
     for (file_list.items) |file| {
         try writer.print("{s}\n", .{file});
     }
@@ -402,34 +376,18 @@ fn run_fzf(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
     var which_process = std.process.Child.init(which_cmd, allocator);
     which_process.stdout_behavior = .Ignore;
     which_process.stderr_behavior = .Ignore;
-    
-    which_process.spawn() catch {
-        std.debug.print("Error: fzf is not installed or not in PATH.\n", .{});
-        return error.FzfNotInstalled;
-    };
-    
+    try which_process.spawn();
     const which_term = try which_process.wait();
     if (which_term != .Exited or which_term.Exited != 0) {
         std.debug.print("Error: fzf is not installed or not in PATH.\n", .{});
         return error.FzfNotInstalled;
     }
-    
-    const fzf_cmd = &[_][]const u8{
-        "fzf",
-        "-m", // Allow multiple selections
-        "--height=40%",
-        "--border",
-        "--preview", "cat {}",
-    };
-    
+
+    const fzf_cmd = &[_][]const u8{ "fzf", "-m", "--height=40%", "--border", "--preview", "cat {}" };
     var fzf_process = std.process.Child.init(fzf_cmd, allocator);
     fzf_process.stdin_behavior = .Pipe;
     fzf_process.stdout_behavior = .Pipe;
-
-    fzf_process.spawn() catch |err| {
-        std.debug.print("Error spawning fzf: {any}\n", .{err});
-        return error.FzfSpawnFailed;
-    };
+    try fzf_process.spawn();
 
     if (fzf_process.stdin) |*stdin| {
         try stdin.writeAll(fzf_input.items);
@@ -439,26 +397,20 @@ fn run_fzf(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
 
     var selected_files = std.ArrayList(u8).init(allocator);
     defer selected_files.deinit();
-
     if (fzf_process.stdout) |stdout| {
         try stdout.reader().readAllArrayList(&selected_files, 1024 * 1024);
     }
 
     const term = try fzf_process.wait();
-    if (term != .Exited or term.Exited != 0) {
-        return error.FzfFailed;
-    }
+    if (term != .Exited or term.Exited != 0) return error.FzfFailed;
 
     var lines = std.mem.splitScalar(u8, selected_files.items, '\n');
     while (lines.next()) |line| {
         if (line.len > 0) {
             const trimmed = std.mem.trim(u8, line, " \t\r\n");
-            if (trimmed.len > 0) {
-                try targets.append(try allocator.dupe(u8, trimmed));
-            }
+            if (trimmed.len > 0) try targets.append(try allocator.dupe(u8, trimmed));
         }
     }
-
     return targets;
 }
 
@@ -473,9 +425,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len <= 1) {
-        options.fzf_mode = true;
-    }
+    if (args.len <= 1) options.fzf_mode = true;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -497,6 +447,14 @@ pub fn main() !void {
                 options.threads = try std.fmt.parseInt(u32, args[i], 10);
             } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--fzf")) {
                 options.fzf_mode = true;
+            } else if (std.mem.eql(u8, arg, "--encoding")) {
+                i += 1;
+                if (i >= args.len) return error.MissingValue;
+                options.encoding = args[i];
+            } else if (std.mem.eql(u8, arg, "--count-files")) {
+                options.count_files = true;
+            } else if (std.mem.eql(u8, arg, "--count-tokens")) {
+                options.count_tokens = true;
             } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
                 print_help();
                 return;
@@ -510,25 +468,17 @@ pub fn main() !void {
         }
     }
 
+    try init_tokenizer(options.encoding);
+    defer c.tiktoken_cleanup();
+
     if (options.fzf_mode and options.targets.items.len == 0) {
-        var fzf_targets = run_fzf(allocator) catch |err| {
-            std.debug.print("Failed to run fzf: {any}\n", .{err});
-            print_help();
-            return;
-        };
-        defer {
-            for (fzf_targets.items) |path| {
-                allocator.free(path);
-            }
-            fzf_targets.deinit();
-        }
-        
+        var fzf_targets = try run_fzf(allocator);
+        defer { for (fzf_targets.items) |path| allocator.free(path); fzf_targets.deinit(); }
         if (fzf_targets.items.len == 0) {
             std.debug.print("No files selected.\n", .{});
             print_help();
             return;
         }
-        
         for (fzf_targets.items) |path| {
             try options.targets.append(try allocator.dupe(u8, path));
         }
@@ -541,4 +491,3 @@ pub fn main() !void {
 
     try process_targets(allocator, options);
 }
-
