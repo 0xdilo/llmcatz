@@ -1,6 +1,7 @@
 const std = @import("std");
 const Thread = std.Thread;
 const Mutex = Thread.Mutex;
+const http = std.http;
 
 const c = @cImport({
     @cInclude("tiktoken_ffi.h");
@@ -45,7 +46,7 @@ fn print_help() void {
     const help_text =
         \\Usage: llmcatz [OPTIONS] [TARGETS...]
         \\
-        \\TARGETS can be: Files, Directory paths, URLs, GitHub repository URLs
+        \\TARGETS can be: Files, Directory paths, URLs (http:// or https://), GitHub repository URLs
         \\
         \\Options:
         \\  -p, --print         Print results to stdout
@@ -61,6 +62,7 @@ fn print_help() void {
     ;
     std.debug.print("{s}", .{help_text});
 }
+
 
 fn should_exclude(path: []const u8, exclude: []const []const u8) bool {
     for (exclude) |pattern| {
@@ -110,8 +112,37 @@ fn fallback_to_xclip(allocator: std.mem.Allocator, text: []const u8) !void {
 const FileTask = struct {
     path: []const u8,
     is_full_path: bool,
+    is_url: bool = false,
     target: ?[]const u8 = null,
 };
+
+fn fetch_url(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
+    var client = http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+
+    const headers = &[_]http.Header{
+        .{ .name = "User-Agent", .value = "llmcatz/1.0" },
+    };
+
+    const response = try client.fetch(.{
+        .method = .GET,
+        .location = .{ .url = url },
+        .extra_headers = headers,
+        .response_storage = .{ .dynamic = &buffer },
+    });
+
+    if (response.status != .ok) {
+        return error.HttpRequestFailed;
+    }
+
+    return try allocator.dupe(u8, buffer.items);
+}
+
+
+
 
 fn init_tokenizer(encoding: []const u8) !void {
     const c_str = c.strdup(encoding.ptr) orelse return error.OutOfMemory;
@@ -129,41 +160,61 @@ fn count_tokens(text: []const u8) usize {
     return c.tiktoken_count(c_str);
 }
 
+
 fn process_file(
     allocator: std.mem.Allocator,
     task: FileTask,
     buffer: *std.ArrayList(u8),
     mutex: *Mutex,
-
     total_tokens: *usize,
 ) !void {
     var local_buffer = std.ArrayList(u8).init(allocator);
     defer local_buffer.deinit();
 
     const writer = local_buffer.writer();
-    const full_path = if (task.is_full_path)
-        try allocator.dupe(u8, task.path)
-    else
-        try std.fs.path.join(allocator, &[_][]const u8{ task.target.?, task.path });
-    defer allocator.free(full_path);
+    
+    if (task.is_url) {
+        try writer.print("[ URL: {s} ]\n", .{task.path});
+        const content = fetch_url(allocator, task.path) catch |err| {
+            try writer.print("Error fetching URL: {any}\n\n", .{err});
+            return;
+        };
+        defer allocator.free(content);
 
-    try writer.print("[ {s} ]\n", .{full_path});
-    const content = std.fs.cwd().readFileAlloc(allocator, full_path, 10 * 1024 * 1024) catch |err| {
-        try writer.print("Error reading file: {any}\n\n", .{err});
-        return;
-    };
-    defer allocator.free(content);
+        const token_count = count_tokens(content);
+        try writer.writeAll(content);
+        try writer.writeAll("\n\n");
 
-    const token_count = count_tokens(content);
+        mutex.lock();
+        defer mutex.unlock();
+        try buffer.appendSlice(local_buffer.items);
+        total_tokens.* += token_count;
+    } else {
+        const full_path = if (task.is_full_path)
+            try allocator.dupe(u8, task.path)
+        else
+            try std.fs.path.join(allocator, &[_][]const u8{ task.target.?, task.path });
+        defer allocator.free(full_path);
 
-    try writer.writeAll(content);
-    try writer.writeAll("\n\n");
+        try writer.print("[ {s} ]\n", .{full_path});
+        const content = std.fs.cwd().readFileAlloc(allocator, full_path, 10 * 1024 * 1024) catch |err| {
+            try writer.print("Error reading file: {any}\n\n", .{err});
+            return;
+        };
+        defer allocator.free(content);
 
-    mutex.lock();
-    defer mutex.unlock();
-    try buffer.appendSlice(local_buffer.items);
-    total_tokens.* += token_count;
+        const token_count = count_tokens(content);
+        try writer.writeAll(content);
+        try writer.writeAll("\n\n");
+
+        mutex.lock();
+        defer mutex.unlock();
+        try buffer.appendSlice(local_buffer.items);
+        total_tokens.* += token_count;
+    }
 }
+
+
 
 fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
     var buffer = std.ArrayList(u8).init(allocator);
@@ -173,29 +224,33 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
     var file_count: usize = 0;
     const writer = buffer.writer();
 
-    try writer.writeAll("[ DIRECTORY STRUCTURE ]\n");
+    try writer.writeAll("[ STRUCTURE ]\n");
     for (options.targets.items) |target| {
-        const stat = std.fs.cwd().statFile(target) catch {
-            try writer.print("{s}\n", .{target});
-            continue;
-        };
-
-        if (stat.kind == .directory) {
-            try writer.print("{s}\n", .{target});
-            var dir = try std.fs.cwd().openDir(target, .{ .iterate = true });
-            defer dir.close();
-            var walker = try dir.walk(allocator);
-            defer walker.deinit();
-            while (try walker.next()) |entry| {
-                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{target, entry.path});
-                defer allocator.free(full_path);
-                if (!should_exclude(full_path, options.exclude.items) and 
-                    !should_exclude(entry.path, options.exclude.items)) {
-                    try writer.print("{s}{s}{s}\n", .{ target, entry.path, if (entry.kind == .directory) "/" else "" });
-                }
-            }
+        if (std.mem.startsWith(u8, target, "http://") or std.mem.startsWith(u8, target, "https://")) {
+            try writer.print("URL: {s}\n", .{target});
         } else {
-            try writer.print("{s}\n", .{target});
+            const stat = std.fs.cwd().statFile(target) catch {
+                try writer.print("{s}\n", .{target});
+                continue;
+            };
+
+            if (stat.kind == .directory) {
+                try writer.print("{s}\n", .{target});
+                var dir = try std.fs.cwd().openDir(target, .{ .iterate = true });
+                defer dir.close();
+                var walker = try dir.walk(allocator);
+                defer walker.deinit();
+                while (try walker.next()) |entry| {
+                    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{target, entry.path});
+                    defer allocator.free(full_path);
+                    if (!should_exclude(full_path, options.exclude.items) and 
+                        !should_exclude(entry.path, options.exclude.items)) {
+                        try writer.print("{s}{s}{s}\n", .{ target, entry.path, if (entry.kind == .directory) "/" else "" });
+                    }
+                }
+            } else {
+                try writer.print("{s}\n", .{target});
+            }
         }
     }
     try writer.writeAll("\n");
@@ -204,32 +259,41 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
     defer tasks.deinit();
 
     for (options.targets.items) |target| {
-        const stat = std.fs.cwd().statFile(target) catch continue;
-        if (stat.kind == .directory) {
-            var dir = try std.fs.cwd().openDir(target, .{ .iterate = true });
-            defer dir.close();
-            var walker = try dir.walk(allocator);
-            defer walker.deinit();
-            while (try walker.next()) |entry| {
-                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{target, entry.path});
-                defer allocator.free(full_path);
-                if (entry.kind == .file and 
-                    !should_exclude(full_path, options.exclude.items) and 
-                    !should_exclude(entry.path, options.exclude.items)) {
-                    try tasks.append(.{
-                        .path = try allocator.dupe(u8, entry.path),
-                        .is_full_path = false,
-                        .target = try allocator.dupe(u8, target),
-                    });
-                    file_count += 1;
-                }
-            }
-        } else if (stat.kind == .file) {
+        if (std.mem.startsWith(u8, target, "http://") or std.mem.startsWith(u8, target, "https://")) {
             try tasks.append(.{
                 .path = try allocator.dupe(u8, target),
                 .is_full_path = true,
+                .is_url = true,
             });
             file_count += 1;
+        } else {
+            const stat = std.fs.cwd().statFile(target) catch continue;
+            if (stat.kind == .directory) {
+                var dir = try std.fs.cwd().openDir(target, .{ .iterate = true });
+                defer dir.close();
+                var walker = try dir.walk(allocator);
+                defer walker.deinit();
+                while (try walker.next()) |entry| {
+                    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{target, entry.path});
+                    defer allocator.free(full_path);
+                    if (entry.kind == .file and 
+                        !should_exclude(full_path, options.exclude.items) and 
+                        !should_exclude(entry.path, options.exclude.items)) {
+                        try tasks.append(.{
+                            .path = try allocator.dupe(u8, entry.path),
+                            .is_full_path = false,
+                            .target = try allocator.dupe(u8, target),
+                        });
+                        file_count += 1;
+                    }
+                }
+            } else if (stat.kind == .file) {
+                try tasks.append(.{
+                    .path = try allocator.dupe(u8, target),
+                    .is_full_path = true,
+                });
+                file_count += 1;
+            }
         }
     }
 
