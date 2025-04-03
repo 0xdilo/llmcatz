@@ -5,10 +5,9 @@ const http = std.http;
 
 const c = @cImport({
     @cInclude("tiktoken_ffi.h");
-    @cInclude("string.h");  
-    @cInclude("stdlib.h"); 
+    @cInclude("string.h");
+    @cInclude("stdlib.h");
 });
-
 
 const Options = struct {
     print: bool = false,
@@ -63,15 +62,19 @@ fn print_help() void {
     std.debug.print("{s}", .{help_text});
 }
 
-
-fn should_exclude(path: []const u8, exclude: []const []const u8) bool {
+fn should_exclude(allocator: std.mem.Allocator, path: []const u8, exclude: []const []const u8) !bool {
+    const normalized_path = try normalize_slashes(allocator, path);
+    defer allocator.free(normalized_path);
     for (exclude) |pattern| {
-        if (std.mem.eql(u8, path, pattern) or
-            std.mem.endsWith(u8, path, pattern) or
-            std.mem.indexOf(u8, path, pattern) != null) return true;
+        const normalized_pattern = try normalize_slashes(allocator, pattern);
+        defer allocator.free(normalized_pattern);
+        if (std.mem.eql(u8, normalized_path, normalized_pattern) or
+            std.mem.endsWith(u8, normalized_path, normalized_pattern) or
+            std.mem.indexOf(u8, normalized_path, normalized_pattern) != null) return true;
 
-        const dir_pattern = if (std.mem.endsWith(u8, pattern, "/")) pattern else std.fmt.allocPrint(std.heap.page_allocator, "{s}/", .{pattern}) catch pattern;
-        if (std.mem.startsWith(u8, path, dir_pattern)) return true;
+        const dir_pattern = if (std.mem.endsWith(u8, normalized_pattern, "/")) normalized_pattern else try std.fmt.allocPrint(allocator, "{s}/", .{normalized_pattern});
+        defer if (!std.mem.endsWith(u8, normalized_pattern, "/")) allocator.free(dir_pattern);
+        if (std.mem.startsWith(u8, normalized_path, dir_pattern)) return true;
     }
     return false;
 }
@@ -141,25 +144,23 @@ fn fetch_url(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
     return try allocator.dupe(u8, buffer.items);
 }
 
-
-
-
 fn init_tokenizer(encoding: []const u8) !void {
     const c_str = c.strdup(encoding.ptr) orelse return error.OutOfMemory;
     defer c.free(c_str);
     const result = c.tiktoken_init(c_str);
     if (result != 0) {
-        std.debug.print("Failed to initialize tokenizer with encoding '{s}': error code {d}\n", .{encoding, result});
+        std.debug.print("Failed to initialize tokenizer with encoding '{s}': error code {d}\n", .{ encoding, result });
         return error.TokenizerInitFailed;
     }
 }
 
 fn count_tokens(text: []const u8) usize {
+    if (text.len == 0) return 0;
     const c_str = c.strdup(text.ptr) orelse return 0;
     defer c.free(c_str);
+    c_str[text.len] = 0;
     return c.tiktoken_count(c_str);
 }
-
 
 fn process_file(
     allocator: std.mem.Allocator,
@@ -172,7 +173,7 @@ fn process_file(
     defer local_buffer.deinit();
 
     const writer = local_buffer.writer();
-    
+
     if (task.is_url) {
         try writer.print("[ URL: {s} ]\n", .{task.path});
         const content = fetch_url(allocator, task.path) catch |err| {
@@ -181,14 +182,21 @@ fn process_file(
         };
         defer allocator.free(content);
 
-        const token_count = count_tokens(content);
-        try writer.writeAll(content);
-        try writer.writeAll("\n\n");
+        if (content.len == 0) {
+            try writer.print("[Empty content]\n\n", .{});
+        } else {
+            const token_count = count_tokens(content);
+            try writer.writeAll(content);
+            try writer.writeAll("\n\n");
+
+            mutex.lock();
+            defer mutex.unlock();
+            total_tokens.* += token_count;
+        }
 
         mutex.lock();
         defer mutex.unlock();
         try buffer.appendSlice(local_buffer.items);
-        total_tokens.* += token_count;
     } else {
         const full_path = if (task.is_full_path)
             try allocator.dupe(u8, task.path)
@@ -203,18 +211,23 @@ fn process_file(
         };
         defer allocator.free(content);
 
-        const token_count = count_tokens(content);
-        try writer.writeAll(content);
-        try writer.writeAll("\n\n");
+        if (content.len == 0) {
+            try writer.print("[Empty file]\n\n", .{});
+        } else {
+            const token_count = count_tokens(content);
+            try writer.writeAll(content);
+            try writer.writeAll("\n\n");
+
+            mutex.lock();
+            defer mutex.unlock();
+            total_tokens.* += token_count;
+        }
 
         mutex.lock();
         defer mutex.unlock();
         try buffer.appendSlice(local_buffer.items);
-        total_tokens.* += token_count;
     }
 }
-
-
 
 fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
     var buffer = std.ArrayList(u8).init(allocator);
@@ -241,10 +254,11 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
                 var walker = try dir.walk(allocator);
                 defer walker.deinit();
                 while (try walker.next()) |entry| {
-                    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{target, entry.path});
+                    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, entry.path });
                     defer allocator.free(full_path);
-                    if (!should_exclude(full_path, options.exclude.items) and 
-                        !should_exclude(entry.path, options.exclude.items)) {
+                    if (!try should_exclude(allocator, full_path, options.exclude.items) and
+                        !try should_exclude(allocator, entry.path, options.exclude.items))
+                    {
                         try writer.print("{s}{s}{s}\n", .{ target, entry.path, if (entry.kind == .directory) "/" else "" });
                     }
                 }
@@ -274,11 +288,12 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
                 var walker = try dir.walk(allocator);
                 defer walker.deinit();
                 while (try walker.next()) |entry| {
-                    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{target, entry.path});
+                    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, entry.path });
                     defer allocator.free(full_path);
-                    if (entry.kind == .file and 
-                        !should_exclude(full_path, options.exclude.items) and 
-                        !should_exclude(entry.path, options.exclude.items)) {
+                    if (entry.kind == .file and
+                        !try should_exclude(allocator, full_path, options.exclude.items) and
+                        !try should_exclude(allocator, entry.path, options.exclude.items))
+                    {
                         try tasks.append(.{
                             .path = try allocator.dupe(u8, entry.path),
                             .is_full_path = false,
@@ -392,7 +407,7 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
             \\    '---''(_/--'  `-'\_) 
             \\Meow! Content written to {s}
             \\Token count: {d}
-        , .{output_path, total_tokens});
+        , .{ output_path, total_tokens });
     } else if (!options.print) {
         try copy_to_clipboard(allocator, buffer.items);
         var recap = std.ArrayList(u8).init(allocator);
@@ -417,7 +432,10 @@ fn process_targets(allocator: std.mem.Allocator, options: Options) !void {
 fn run_fzf(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
     var targets = std.ArrayList([]const u8).init(allocator);
     var file_list = std.ArrayList([]const u8).init(allocator);
-    defer { for (file_list.items) |path| allocator.free(path); file_list.deinit(); }
+    defer {
+        for (file_list.items) |path| allocator.free(path);
+        file_list.deinit();
+    }
 
     var dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
     defer dir.close();
@@ -436,7 +454,7 @@ fn run_fzf(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
         try writer.print("{s}\n", .{file});
     }
 
-    const which_cmd = &[_][]const u8{"which", "fzf"};
+    const which_cmd = &[_][]const u8{ "which", "fzf" };
     var which_process = std.process.Child.init(which_cmd, allocator);
     which_process.stdout_behavior = .Ignore;
     which_process.stderr_behavior = .Ignore;
@@ -504,7 +522,7 @@ pub fn main() !void {
             } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--exclude")) {
                 i += 1;
                 if (i >= args.len) return error.MissingValue;
-                try options.exclude.append(args[i]);
+                try options.exclude.append(try allocator.dupe(u8, args[i]));
             } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--threads")) {
                 i += 1;
                 if (i >= args.len) return error.MissingValue;
@@ -537,7 +555,10 @@ pub fn main() !void {
 
     if (options.fzf_mode and options.targets.items.len == 0) {
         var fzf_targets = try run_fzf(allocator);
-        defer { for (fzf_targets.items) |path| allocator.free(path); fzf_targets.deinit(); }
+        defer {
+            for (fzf_targets.items) |path| allocator.free(path);
+            fzf_targets.deinit();
+        }
         if (fzf_targets.items.len == 0) {
             std.debug.print("No files selected.\n", .{});
             print_help();
@@ -554,4 +575,20 @@ pub fn main() !void {
     }
 
     try process_targets(allocator, options);
+}
+
+fn normalize_slashes(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    var last_was_slash = false;
+    for (path) |char| {
+        if (char == '/') {
+            if (!last_was_slash) try result.append(char);
+            last_was_slash = true;
+        } else {
+            try result.append(char);
+            last_was_slash = false;
+        }
+    }
+    return result.toOwnedSlice();
 }
