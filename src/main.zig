@@ -80,21 +80,39 @@ fn should_exclude(allocator: std.mem.Allocator, path: []const u8, exclude: []con
 }
 
 fn copy_to_clipboard(allocator: std.mem.Allocator, text: []const u8) !void {
-    if (std.posix.getenv("WAYLAND_DISPLAY")) |_| {
-        const wayland_cmd = &[_][]const u8{"wl-copy"};
-        var wayland_child = std.process.Child.init(wayland_cmd, allocator);
-        wayland_child.stdin_behavior = .Pipe;
-        try wayland_child.spawn();
-        if (wayland_child.stdin) |*stdin| {
+    const os_tag = @import("builtin").os.tag;
+
+    if (os_tag == .linux) {
+        if (std.posix.getenv("WAYLAND_DISPLAY")) |_| {
+            const wayland_cmd = &[_][]const u8{"wl-copy"};
+            var wayland_child = std.process.Child.init(wayland_cmd, allocator);
+            wayland_child.stdin_behavior = .Pipe;
+            try wayland_child.spawn();
+            if (wayland_child.stdin) |*stdin| {
+                try stdin.writeAll(text);
+                stdin.close();
+                wayland_child.stdin = null;
+            }
+            const term = try wayland_child.wait();
+            if (term == .Exited and term.Exited == 0) return;
+            return error.ClipboardFailed;
+        }
+        return try fallback_to_xclip(allocator, text);
+    } else if (os_tag == .macos) {
+        const pbcopy_cmd = &[_][]const u8{"pbcopy"};
+        var pbcopy_child = std.process.Child.init(pbcopy_cmd, allocator);
+        pbcopy_child.stdin_behavior = .Pipe;
+        try pbcopy_child.spawn();
+        if (pbcopy_child.stdin) |*stdin| {
             try stdin.writeAll(text);
             stdin.close();
-            wayland_child.stdin = null;
+            pbcopy_child.stdin = null;
         }
-        const term = try wayland_child.wait();
+        const term = try pbcopy_child.wait();
         if (term == .Exited and term.Exited == 0) return;
-        return try fallback_to_xclip(allocator, text);
+        return error.ClipboardFailed;
     } else {
-        return try fallback_to_xclip(allocator, text);
+        return error.ClipboardFailed;
     }
 }
 
