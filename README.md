@@ -13,7 +13,7 @@ A cute and powerful tool to gather files into a format perfect for LLMs and AI a
 - 🚀 **Super Fast**: Written in Zig for maximum performance.
 - 🧵 **Multi-threaded**: Processes files in parallel (customizable thread count).
 - 📋 **Clipboard Integration**: Copies results to your clipboard (X11/Wayland).
-- 🔍 **Flexible Targeting**: Process files, directories, or (soon) remote repositories.
+- 🔍 **Flexible Targeting**: Process files, directories, or GitHub repositories.
 - 🙈 **Exclusion Patterns**: Skip files or directories you don’t want.
 - 🔎 **Interactive Selection**: Use `fzf` to pick files interactively.
 - 🧮 **Token Counting**: Count tokens using TikToken encodings (e.g., `cl100k_base`).
@@ -22,7 +22,6 @@ A cute and powerful tool to gather files into a format perfect for LLMs and AI a
 ## Dependencies
 - [Zig](https://ziglang.org/) (for building the main binary)
 - [Rust](https://www.rust-lang.org/) (for building the `tiktoken_ffi` library)
-- [tiktoken-rs](https://github.com/oconnor663/tiktoken-rs) (Rust library for tokenization)
 - [fzf](https://github.com/junegunn/fzf) (optional, for interactive file selection)
 - `xclip` or `wl-copy` (optional, for clipboard support on X11 or Wayland)
 
@@ -58,6 +57,8 @@ llmcatz -e ".git,node_modules" src/
 llmcatz -t 8 src/
 # Process specific files
 llmcatz file1.txt file2.txt
+# Clone and process a GitHub repository
+llmcatz https://github.com/username/repo
 # Use a specific token encoding
 llmcatz --encoding o200k_base src/
 # Count total files processed
