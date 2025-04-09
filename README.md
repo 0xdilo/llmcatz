@@ -17,6 +17,7 @@ A cute and powerful tool to gather files into a format perfect for LLMs and AI a
 - 🙈 **Exclusion Patterns**: Skip files or directories you don’t want.
 - 🔎 **Interactive Selection**: Use `fzf` to pick files interactively.
 - 🧮 **Token Counting**: Count tokens using TikToken encodings (e.g., `cl100k_base`).
+- 📊 **JSON Export**: Export results in JSON format for programmatic use.
 - 🐱 **Adorable ASCII Art**: Because why not?
 
 ## Dependencies
@@ -65,4 +66,6 @@ llmcatz --encoding o200k_base src/
 llmcatz --count-files src/
 # Count tokens only
 llmcatz --count-tokens src/
+# Export to JSON format
+llmcatz --json -o output.json src/
 

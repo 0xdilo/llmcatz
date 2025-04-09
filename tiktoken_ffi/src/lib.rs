@@ -1,4 +1,3 @@
-// tiktoken_ffi/src/lib.rs
 use tiktoken_rs::{get_bpe_from_model, CoreBPE};
 use std::ffi::CStr;
 use std::sync::Mutex;
