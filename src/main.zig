@@ -19,6 +19,7 @@ const Options = struct {
     encoding: []const u8 = "cl100k_base",
     count_files: bool = false,
     count_tokens: bool = false,
+    json: bool = false,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) Options {
@@ -162,6 +163,7 @@ fn print_help() void {
         \\  --encoding         Tokenizer encoding (e.g., o200k_base, cl100k_base)
         \\  --count-files      Print total file count
         \\  --count-tokens     Only count tokens without saving content
+        \\  --json             Output in JSON format
         \\  -h, --help          Display this help message
         \\
     ;
@@ -313,6 +315,8 @@ fn process_file(
     buffer: *std.ArrayList(u8),
     mutex: *Mutex,
     total_tokens: *usize,
+    options: Options,
+    file_map: *std.StringHashMap([]const u8),
 ) !void {
     var local_buffer = std.ArrayList(u8).init(allocator);
     defer local_buffer.deinit();
@@ -337,6 +341,13 @@ fn process_file(
             mutex.lock();
             defer mutex.unlock();
             total_tokens.* += token_count;
+            
+            if (options.json) {
+                try file_map.put(
+                    try allocator.dupe(u8, task.path),
+                    try allocator.dupe(u8, content),
+                );
+            }
         }
 
         mutex.lock();
@@ -373,6 +384,13 @@ fn process_file(
             mutex.lock();
             defer mutex.unlock();
             total_tokens.* += token_count;
+            
+            if (options.json) {
+                try file_map.put(
+                    try allocator.dupe(u8, full_path),
+                    try allocator.dupe(u8, content),
+                );
+            }
         }
 
         mutex.lock();
@@ -390,6 +408,20 @@ fn process_targets(
 
     var total_tokens: usize = 0;
     var file_count: usize = 0;
+    
+    var tree_list = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (tree_list.items) |path| allocator.free(path);
+        tree_list.deinit();
+    }
+    
+    var file_map = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var it = file_map.iterator();
+        while (it.next()) |entry| allocator.free(entry.value_ptr.*);
+        file_map.deinit();
+    }
+    
     const writer = buffer.writer();
 
     try writer.writeAll("[ STRUCTURE ]\n");
@@ -423,6 +455,7 @@ fn process_targets(
                     .is_url = true,
                 });
                 file_count += 1;
+                try tree_list.append(try allocator.dupe(u8, file_path));
             }
         } else if (std.mem.startsWith(u8, target, "http://") or
             std.mem.startsWith(u8, target, "https://"))
@@ -434,6 +467,7 @@ fn process_targets(
                 .is_url = true,
             });
             file_count += 1;
+            try tree_list.append(try allocator.dupe(u8, target));
         } else {
             const stat = std.fs.cwd().statFile(target) catch {
                 try writer.print("{s}\n", .{target});
@@ -471,6 +505,7 @@ fn process_targets(
                                 .target = try allocator.dupe(u8, target),
                             });
                             file_count += 1;
+                            try tree_list.append(try allocator.dupe(u8, entry.path));
                         }
                         try writer.print(
                             "{s}{s}{s}\n",
@@ -489,6 +524,7 @@ fn process_targets(
                     .is_full_path = true,
                 });
                 file_count += 1;
+                try tree_list.append(try allocator.dupe(u8, target));
             }
         }
     }
@@ -505,7 +541,7 @@ fn process_targets(
 
     if (thread_count == 1 or tasks.items.len == 1) {
         for (tasks.items) |task| {
-            try process_file(allocator, task, &buffer, &mutex, &total_tokens);
+            try process_file(allocator, task, &buffer, &mutex, &total_tokens, options, &file_map);
             allocator.free(task.path);
             if (task.target) |t| allocator.free(t);
         }
@@ -523,6 +559,7 @@ fn process_targets(
             options: Options,
             total_tokens: *usize,
             next_task: *std.atomic.Value(usize),
+            file_map: *std.StringHashMap([]const u8),
         };
 
         const context = ThreadContext{
@@ -533,6 +570,7 @@ fn process_targets(
             .options = options,
             .total_tokens = &total_tokens,
             .next_task = &next_task,
+            .file_map = &file_map,
         };
 
         const thread_fn = struct {
@@ -547,6 +585,8 @@ fn process_targets(
                         ctx.buffer,
                         ctx.mutex,
                         ctx.total_tokens,
+                        ctx.options,
+                        ctx.file_map,
                     );
                 }
             }
@@ -562,6 +602,52 @@ fn process_targets(
             allocator.free(task.path);
             if (task.target) |t| allocator.free(t);
         }
+    }
+
+    if (options.json) {
+        var json_buffer = std.ArrayList(u8).init(allocator);
+        defer json_buffer.deinit();
+        const jw = json_buffer.writer();
+
+        try jw.writeAll("{\n  \"tree\": [\n");
+        for (tree_list.items, 0..) |path, idx| {
+            try jw.writeAll("    ");
+            try std.json.stringify(path, .{}, jw);
+            try jw.print("{s}\n", .{
+                if (idx + 1 == tree_list.items.len) "" else ",",
+            });
+        }
+        try jw.writeAll("  ],\n");
+        try jw.print("  \"token_count\": {d}", .{total_tokens});
+
+        var it = file_map.iterator();
+        while (it.next()) |entry| {
+            try jw.writeAll(",\n  ");
+            try std.json.stringify(entry.key_ptr.*, .{}, jw);
+            try jw.writeAll(": ");
+            try std.json.stringify(entry.value_ptr.*, .{}, jw);
+        }
+        try jw.writeAll("\n}\n");
+
+        if (options.print) {
+            std.debug.print("{s}", .{json_buffer.items});
+        } else {
+            try copy_to_clipboard(allocator, json_buffer.items);
+            std.debug.print(
+                \\
+                \\      |\      _,,,---,,_
+                \\ZZZzz /,`.-'`'    -.  ;-;;,_
+                \\     |,4-  ) )-,_. ,\ (  `'-'
+                \\    '---''(_/--'  `-'\_) 
+                \\Meow! JSON content copied to clipboard!
+                \\Token count: {d}
+            , .{total_tokens});
+            if (options.count_files) {
+                std.debug.print("\nProcessed {d} files", .{file_count});
+            }
+            std.debug.print("\n", .{});
+        }
+        return;
     }
 
     if (options.count_tokens) {
@@ -743,6 +829,8 @@ pub fn main() !void {
                 options.count_files = true;
             } else if (std.mem.eql(u8, arg, "--count-tokens")) {
                 options.count_tokens = true;
+            } else if (std.mem.eql(u8, arg, "--json")) {
+                options.json = true;
             } else if (std.mem.eql(u8, arg, "-h") or
                 std.mem.eql(u8, arg, "--help"))
             {
