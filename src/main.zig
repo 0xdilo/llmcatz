@@ -20,6 +20,7 @@ const Options = struct {
     count_files: bool = false,
     count_tokens: bool = false,
     json: bool = false,
+    markdown: bool = false,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) Options {
@@ -164,6 +165,7 @@ fn print_help() void {
         \\  --count-files      Print total file count
         \\  --count-tokens     Only count tokens without saving content
         \\  --json             Output in JSON format
+        \\  --markdown         Enable Markdown formatting for output
         \\  -h, --help          Display this help message
         \\
     ;
@@ -324,24 +326,43 @@ fn process_file(
     const writer = local_buffer.writer();
 
     if (task.is_url) {
-        try writer.print("[ URL: {s} ]\n", .{task.path});
+        if (options.markdown) {
+            try writer.print("## URL: {s}\n\n", .{task.path});
+            try writer.print("```\n", .{});
+        } else {
+            try writer.print("[ URL: {s} ]\n", .{task.path});
+        }
+
         const content = fetch_url(allocator, task.path) catch |err| {
-            try writer.print("Error fetching URL: {any}\n\n", .{err});
+            if (options.markdown) {
+                try writer.print("Error fetching URL: {any}\n```\n\n", .{err});
+            } else {
+                try writer.print("Error fetching URL: {any}\n\n", .{err});
+            }
             return;
         };
         defer allocator.free(content);
 
         if (content.len == 0) {
-            try writer.print("[Empty content]\n\n", .{});
+            if (options.markdown) {
+                try writer.print("[Empty content]\n```\n\n", .{});
+            } else {
+                try writer.print("[Empty content]\n\n", .{});
+            }
         } else {
             const token_count = count_tokens(content);
-            try writer.writeAll(content);
-            try writer.writeAll("\n\n");
+            if (options.markdown) {
+                try writer.writeAll(content);
+                try writer.print("\n```\n\n", .{});
+            } else {
+                try writer.writeAll(content);
+                try writer.writeAll("\n\n");
+            }
 
             mutex.lock();
             defer mutex.unlock();
             total_tokens.* += token_count;
-            
+
             if (options.json) {
                 try file_map.put(
                     try allocator.dupe(u8, task.path),
@@ -363,28 +384,47 @@ fn process_file(
             );
         defer allocator.free(full_path);
 
-        try writer.print("[ {s} ]\n", .{full_path});
+        if (options.markdown) {
+            try writer.print("## {s}\n\n", .{full_path});
+            try writer.print("```\n", .{});
+        } else {
+            try writer.print("[ {s} ]\n", .{full_path});
+        }
+
         const content = std.fs.cwd().readFileAlloc(
             allocator,
             full_path,
             10 * 1024 * 1024,
         ) catch |err| {
-            try writer.print("Error reading file: {any}\n\n", .{err});
+            if (options.markdown) {
+                try writer.print("Error reading file: {any}\n```\n\n", .{err});
+            } else {
+                try writer.print("Error reading file: {any}\n\n", .{err});
+            }
             return;
         };
         defer allocator.free(content);
 
         if (content.len == 0) {
-            try writer.print("[Empty file]\n\n", .{});
+            if (options.markdown) {
+                try writer.print("[Empty file]\n```\n\n", .{});
+            } else {
+                try writer.print("[Empty file]\n\n", .{});
+            }
         } else {
             const token_count = count_tokens(content);
-            try writer.writeAll(content);
-            try writer.writeAll("\n\n");
+            if (options.markdown) {
+                try writer.writeAll(content);
+                try writer.print("\n```\n\n", .{});
+            } else {
+                try writer.writeAll(content);
+                try writer.writeAll("\n\n");
+            }
 
             mutex.lock();
             defer mutex.unlock();
             total_tokens.* += token_count;
-            
+
             if (options.json) {
                 try file_map.put(
                     try allocator.dupe(u8, full_path),
@@ -408,23 +448,27 @@ fn process_targets(
 
     var total_tokens: usize = 0;
     var file_count: usize = 0;
-    
+
     var tree_list = std.ArrayList([]const u8).init(allocator);
     defer {
         for (tree_list.items) |path| allocator.free(path);
         tree_list.deinit();
     }
-    
+
     var file_map = std.StringHashMap([]const u8).init(allocator);
     defer {
         var it = file_map.iterator();
         while (it.next()) |entry| allocator.free(entry.value_ptr.*);
         file_map.deinit();
     }
-    
+
     const writer = buffer.writer();
 
-    try writer.writeAll("[ STRUCTURE ]\n");
+    if (options.markdown) {
+        try writer.writeAll("# Structure\n\n");
+    } else {
+        try writer.writeAll("[ STRUCTURE ]\n");
+    }
 
     var tasks = std.ArrayList(FileTask).init(allocator);
     defer tasks.deinit();
@@ -448,7 +492,11 @@ fn process_targets(
                 );
                 defer allocator.free(raw_url);
 
-                try writer.print("GitHub: {s}\n", .{file_path});
+                if (options.markdown) {
+                    try writer.print("- GitHub: `{s}`\n", .{file_path});
+                } else {
+                    try writer.print("GitHub: {s}\n", .{file_path});
+                }
                 try tasks.append(.{
                     .path = try allocator.dupe(u8, raw_url),
                     .is_full_path = true,
@@ -460,7 +508,11 @@ fn process_targets(
         } else if (std.mem.startsWith(u8, target, "http://") or
             std.mem.startsWith(u8, target, "https://"))
         {
-            try writer.print("URL: {s}\n", .{target});
+            if (options.markdown) {
+                try writer.print("- URL: `{s}`\n", .{target});
+            } else {
+                try writer.print("URL: {s}\n", .{target});
+            }
             try tasks.append(.{
                 .path = try allocator.dupe(u8, target),
                 .is_full_path = true,
@@ -470,12 +522,24 @@ fn process_targets(
             try tree_list.append(try allocator.dupe(u8, target));
         } else {
             const stat = std.fs.cwd().statFile(target) catch {
-                try writer.print("{s}\n", .{target});
+                if (options.markdown) {
+                    try writer.print("- Error accessing: `{s}`\n", .{target});
+                } else {
+                    try writer.print("Error accessing: {s}\n", .{target});
+                }
                 continue;
             };
 
             if (stat.kind == .directory) {
-                try writer.print("{s}\n", .{target});
+                if (!options.markdown) {
+                    const normalized_target = try normalize_slashes(allocator, target);
+                    defer allocator.free(normalized_target);
+                    const display_target = if (std.mem.endsWith(u8, normalized_target, "/"))
+                        normalized_target[0 .. normalized_target.len - 1]
+                    else
+                        normalized_target;
+                    try writer.print("{s}/\n", .{display_target});
+                }
                 var dir = try std.fs.cwd().openDir(target, .{ .iterate = true });
                 defer dir.close();
                 var walker = try dir.walk(allocator);
@@ -507,18 +571,26 @@ fn process_targets(
                             file_count += 1;
                             try tree_list.append(try allocator.dupe(u8, entry.path));
                         }
-                        try writer.print(
-                            "{s}{s}{s}\n",
-                            .{
-                                target,
-                                entry.path,
-                                if (entry.kind == .directory) "/" else "",
-                            },
-                        );
+
+                        const is_dir = entry.kind == .directory;
+                        const raw_display_path = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ target, entry.path, if (is_dir) "/" else "" });
+                        const display_path = try normalize_slashes(allocator, raw_display_path);
+                        defer allocator.free(raw_display_path);
+                        defer allocator.free(display_path);
+
+                        if (options.markdown) {
+                            try writer.print("- `{s}`\n", .{display_path});
+                        } else {
+                            try writer.print("{s}\n", .{display_path});
+                        }
                     }
                 }
             } else if (stat.kind == .file) {
-                try writer.print("{s}\n", .{target});
+                if (options.markdown) {
+                    try writer.print("- `{s}`\n", .{target});
+                } else {
+                    try writer.print("{s}\n", .{target});
+                }
                 try tasks.append(.{
                     .path = try allocator.dupe(u8, target),
                     .is_full_path = true,
@@ -836,6 +908,8 @@ pub fn main() !void {
             {
                 print_help();
                 return;
+            } else if (std.mem.eql(u8, arg, "--markdown")) {
+                options.markdown = true;
             } else {
                 std.debug.print("Unknown option: {s}\n", .{arg});
                 print_help();
