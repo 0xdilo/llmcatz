@@ -10,8 +10,13 @@ tiktoken-rs = "0.6.0"
 crate-type = ["cdylib"]
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
+overflow-checks = false
 strip = true
+debug-assertions = false
 debug = false
+panic = "abort"
+
+

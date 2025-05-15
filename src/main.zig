@@ -9,6 +9,29 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
+const unwanted_extensions = &[_][]const u8{
+    // Images
+    ".png", ".jpg", ".jpeg", ".gif",   ".bmp",  ".tiff",   ".webp", ".svg",  ".ico",
+    // Compiled objects / libraries / executables
+    ".o",   ".a",   ".so",   ".dylib", ".dll",  ".exe",    ".obj",  ".lib",
+    // Archives
+     ".zip",
+    ".tar", ".gz",  ".bz2",  ".xz",    ".rar",  ".7z",     ".jar",  ".war",  ".ear",
+    // Documents (often binary or complex structure not suitable for raw cat)
+    ".pdf", ".doc", ".docx", ".ppt",   ".pptx", ".xls",    ".xlsx", ".odt",  ".ods",
+    ".odp",
+    // Other binary
+    ".bin", ".dat",  ".iso",   ".img",  ".class",  ".pyc",  ".wasm", ".DS_Store",
+    // Media
+    ".mp3", ".mp4", ".avi",  ".mkv",   ".mov",  ".wav",    ".flac", ".ogg",  ".webm",
+    // Fonts
+    ".ttf", ".otf", ".woff", ".woff2",
+    // Databases & Git objects
+    ".db",   ".sqlite", ".mdb",  ".idx",  ".pack",
+    // Temp/swap files
+    ".swp", ".swo",
+};
+
 const Options = struct {
     print: bool = false,
     output: ?[]const u8 = null,
@@ -485,6 +508,8 @@ fn process_targets(
             }
 
             for (file_list.items) |file_path| {
+                if (has_unwanted_extension(file_path)) continue;
+                std.debug.print("{s}", .{file_path});
                 const raw_url = try std.fmt.allocPrint(
                     allocator,
                     "https://raw.githubusercontent.com/{s}/{s}/{s}/{s}",
@@ -544,7 +569,10 @@ fn process_targets(
                 defer dir.close();
                 var walker = try dir.walk(allocator);
                 defer walker.deinit();
+
                 while (try walker.next()) |entry| {
+                    if (is_dot_folder(entry.path)) continue;
+
                     const full_path = try std.fmt.allocPrint(
                         allocator,
                         "{s}/{s}",
@@ -562,7 +590,7 @@ fn process_targets(
                             options.exclude.items,
                         ))
                     {
-                        if (entry.kind == .file) {
+                        if (entry.kind == .file and !has_unwanted_extension(entry.path)) {
                             try tasks.append(.{
                                 .path = try allocator.dupe(u8, entry.path),
                                 .is_full_path = false,
@@ -586,6 +614,14 @@ fn process_targets(
                     }
                 }
             } else if (stat.kind == .file) {
+                if (has_unwanted_extension(target)) {
+                    if (options.markdown) {
+                        try writer.print("- [skipped binary] `{s}`\n", .{target});
+                    } else {
+                        try writer.print("[skipped binary] {s}\n", .{target});
+                    }
+                    continue;
+                }
                 if (options.markdown) {
                     try writer.print("- `{s}`\n", .{target});
                 } else {
@@ -964,4 +1000,21 @@ fn normalize_slashes(
         }
     }
     return result.toOwnedSlice();
+}
+fn has_unwanted_extension(path: []const u8) bool {
+    for (unwanted_extensions) |ext| {
+        if (path.len >= ext.len and
+            std.ascii.eqlIgnoreCase(path[path.len - ext.len ..], ext))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+fn is_dot_folder(path: []const u8) bool {
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |part| {
+        if (part.len > 0 and part[0] == '.') return true;
+    }
+    return false;
 }
