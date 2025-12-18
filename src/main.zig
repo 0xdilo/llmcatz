@@ -397,13 +397,14 @@ fn process_file(
             mutex.lock();
             defer mutex.unlock();
             total_tokens.* += token_count;
-
+            try buffer.appendSlice(local_buffer.items);
             if (options.json) {
                 try file_map.put(
                     try allocator.dupe(u8, task.path),
                     try allocator.dupe(u8, content),
                 );
             }
+            return;
         }
 
         mutex.lock();
@@ -468,13 +469,14 @@ fn process_file(
             mutex.lock();
             defer mutex.unlock();
             total_tokens.* += token_count;
-
+            try buffer.appendSlice(local_buffer.items);
             if (options.json) {
                 try file_map.put(
                     try allocator.dupe(u8, full_path),
                     try allocator.dupe(u8, content),
                 );
             }
+            return;
         }
 
         mutex.lock();
