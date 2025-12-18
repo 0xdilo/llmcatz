@@ -9,6 +9,8 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
+const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+
 const unwanted_extensions = &[_][]const u8{
     // Images
     ".png", ".jpg", ".jpeg", ".gif",   ".bmp",  ".tiff",   ".webp", ".svg",  ".ico",
@@ -432,7 +434,7 @@ fn process_file(
         const content = std.fs.cwd().readFileAlloc(
             allocator,
             full_path,
-            10 * 1024 * 1024,
+            MAX_FILE_SIZE,
         ) catch |err| {
             if (!options.raw) {
                 if (options.markdown) {
