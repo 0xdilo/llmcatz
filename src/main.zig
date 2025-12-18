@@ -209,20 +209,18 @@ fn should_exclude(
     const normalized_path = try normalize_slashes(allocator, path);
     defer allocator.free(normalized_path);
     for (exclude) |pattern| {
-        const normalized_pattern = try normalize_slashes(allocator, pattern);
-        defer allocator.free(normalized_pattern);
-        if (std.mem.eql(u8, normalized_path, normalized_pattern) or
-            std.mem.endsWith(u8, normalized_path, normalized_pattern) or
-            std.mem.indexOf(u8, normalized_path, normalized_pattern) != null)
+        if (std.mem.eql(u8, normalized_path, pattern) or
+            std.mem.endsWith(u8, normalized_path, pattern) or
+            std.mem.indexOf(u8, normalized_path, pattern) != null)
             return true;
 
-        const dir_pattern = if (std.mem.endsWith(u8, normalized_pattern, "/"))
-            normalized_pattern
-        else
-            try std.fmt.allocPrint(allocator, "{s}/", .{normalized_pattern});
-        defer if (!std.mem.endsWith(u8, normalized_pattern, "/"))
-            allocator.free(dir_pattern);
-        if (std.mem.startsWith(u8, normalized_path, dir_pattern)) return true;
+        if (std.mem.endsWith(u8, pattern, "/")) {
+            if (std.mem.startsWith(u8, normalized_path, pattern)) return true;
+        } else {
+            const dir_pattern = try std.fmt.allocPrint(allocator, "{s}/", .{pattern});
+            defer allocator.free(dir_pattern);
+            if (std.mem.startsWith(u8, normalized_path, dir_pattern)) return true;
+        }
     }
     return false;
 }
@@ -963,7 +961,8 @@ pub fn main() !void {
             {
                 i += 1;
                 if (i >= args.len) return error.MissingValue;
-                try options.exclude.append(try allocator.dupe(u8, args[i]));
+                const normalized = try normalize_slashes(allocator, args[i]);
+                try options.exclude.append(normalized);
             } else if (std.mem.eql(u8, arg, "-t") or
                 std.mem.eql(u8, arg, "--threads"))
             {
