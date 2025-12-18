@@ -11,28 +11,30 @@ const c = @cImport({
 
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 
-const unwanted_extensions = &[_][]const u8{
-    // Images
-    ".png", ".jpg", ".jpeg", ".gif",   ".bmp",  ".tiff",   ".webp", ".svg",  ".ico",
-    // Compiled objects / libraries / executables
-    ".o",   ".a",   ".so",   ".dylib", ".dll",  ".exe",    ".obj",  ".lib",
-    // Archives
-     ".zip",
-    ".tar", ".gz",  ".bz2",  ".xz",    ".rar",  ".7z",     ".jar",  ".war",  ".ear",
-    // Documents (often binary or complex structure not suitable for raw cat)
-    ".pdf", ".doc", ".docx", ".ppt",   ".pptx", ".xls",    ".xlsx", ".odt",  ".ods",
-    ".odp",
-    // Other binary
-    ".bin", ".dat",  ".iso",   ".img",  ".class",  ".pyc",  ".wasm", ".DS_Store",
-    // Media
-    ".mp3", ".mp4", ".avi",  ".mkv",   ".mov",  ".wav",    ".flac", ".ogg",  ".webm",
-    // Fonts
-    ".ttf", ".otf", ".woff", ".woff2",
-    // Databases & Git objects
-    ".db",   ".sqlite", ".mdb",  ".idx",  ".pack",
-    // Temp/swap files
-    ".swp", ".swo",
-};
+const unwanted_extensions = std.StaticStringMap(void).initComptime(.{
+    .{ ".png", {} },      .{ ".jpg", {} },      .{ ".jpeg", {} },
+    .{ ".gif", {} },      .{ ".bmp", {} },      .{ ".tiff", {} },
+    .{ ".webp", {} },     .{ ".svg", {} },      .{ ".ico", {} },
+    .{ ".o", {} },        .{ ".a", {} },        .{ ".so", {} },
+    .{ ".dylib", {} },    .{ ".dll", {} },      .{ ".exe", {} },
+    .{ ".obj", {} },      .{ ".lib", {} },      .{ ".zip", {} },
+    .{ ".tar", {} },      .{ ".gz", {} },       .{ ".bz2", {} },
+    .{ ".xz", {} },       .{ ".rar", {} },      .{ ".7z", {} },
+    .{ ".jar", {} },      .{ ".war", {} },      .{ ".ear", {} },
+    .{ ".pdf", {} },      .{ ".doc", {} },      .{ ".docx", {} },
+    .{ ".ppt", {} },      .{ ".pptx", {} },     .{ ".xls", {} },
+    .{ ".xlsx", {} },     .{ ".odt", {} },      .{ ".ods", {} },
+    .{ ".odp", {} },      .{ ".bin", {} },      .{ ".dat", {} },
+    .{ ".iso", {} },      .{ ".img", {} },      .{ ".class", {} },
+    .{ ".pyc", {} },      .{ ".wasm", {} },     .{ ".ds_store", {} },
+    .{ ".mp3", {} },      .{ ".mp4", {} },      .{ ".avi", {} },
+    .{ ".mkv", {} },      .{ ".mov", {} },      .{ ".wav", {} },
+    .{ ".flac", {} },     .{ ".ogg", {} },      .{ ".webm", {} },
+    .{ ".ttf", {} },      .{ ".otf", {} },      .{ ".woff", {} },
+    .{ ".woff2", {} },    .{ ".db", {} },       .{ ".sqlite", {} },
+    .{ ".mdb", {} },      .{ ".idx", {} },      .{ ".pack", {} },
+    .{ ".swp", {} },      .{ ".swo", {} },
+});
 
 const Options = struct {
     print: bool = false,
@@ -1047,14 +1049,12 @@ fn normalize_slashes(
     return result.toOwnedSlice();
 }
 fn has_unwanted_extension(path: []const u8) bool {
-    for (unwanted_extensions) |ext| {
-        if (path.len >= ext.len and
-            std.ascii.eqlIgnoreCase(path[path.len - ext.len ..], ext))
-        {
-            return true;
-        }
-    }
-    return false;
+    const dot_pos = std.mem.lastIndexOfScalar(u8, path, '.') orelse return false;
+    const ext = path[dot_pos..];
+    if (ext.len > 16) return false;
+    var lower_buf: [16]u8 = undefined;
+    const lower_ext = std.ascii.lowerString(&lower_buf, ext);
+    return unwanted_extensions.has(lower_ext);
 }
 fn is_dot_folder(path: []const u8) bool {
     var it = std.mem.splitScalar(u8, path, '/');
