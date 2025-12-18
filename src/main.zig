@@ -316,9 +316,10 @@ fn fetch_url(
 }
 
 fn init_tokenizer(encoding: []const u8) !void {
-    const c_str = c.strdup(encoding.ptr) orelse return error.OutOfMemory;
-    defer c.free(c_str);
-    const result = c.tiktoken_init(c_str);
+    const c_alloc = std.heap.c_allocator;
+    const c_str = try c_alloc.dupeZ(u8, encoding);
+    defer c_alloc.free(c_str);
+    const result = c.tiktoken_init(c_str.ptr);
     if (result != 0) {
         std.debug.print(
             "Failed to initialize tokenizer with encoding '{s}': error code {d}\n",
@@ -330,10 +331,10 @@ fn init_tokenizer(encoding: []const u8) !void {
 
 fn count_tokens(text: []const u8) usize {
     if (text.len == 0) return 0;
-    const c_str = c.strdup(text.ptr) orelse return 0;
-    defer c.free(c_str);
-    c_str[text.len] = 0;
-    return c.tiktoken_count(c_str);
+    const c_alloc = std.heap.c_allocator;
+    const c_str = c_alloc.dupeZ(u8, text) catch return 0;
+    defer c_alloc.free(c_str);
+    return c.tiktoken_count(c_str.ptr);
 }
 
 fn process_file(
