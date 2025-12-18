@@ -44,6 +44,7 @@ const Options = struct {
     count_tokens: bool = false,
     json: bool = false,
     markdown: bool = false,
+    raw: bool = false,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) Options {
@@ -189,6 +190,7 @@ fn print_help() void {
         \\  --count-tokens     Only count tokens without saving content
         \\  --json             Output in JSON format
         \\  --markdown         Enable Markdown formatting for output
+        \\  --raw              Output raw file contents only (no headers/structure)
         \\  -h, --help          Display this help message
         \\
     ;
@@ -349,32 +351,41 @@ fn process_file(
     const writer = local_buffer.writer();
 
     if (task.is_url) {
-        if (options.markdown) {
-            try writer.print("## URL: {s}\n\n", .{task.path});
-            try writer.print("```\n", .{});
-        } else {
-            try writer.print("[ URL: {s} ]\n", .{task.path});
+        if (!options.raw) {
+            if (options.markdown) {
+                try writer.print("## URL: {s}\n\n", .{task.path});
+                try writer.print("```\n", .{});
+            } else {
+                try writer.print("[ URL: {s} ]\n", .{task.path});
+            }
         }
 
         const content = fetch_url(allocator, task.path) catch |err| {
-            if (options.markdown) {
-                try writer.print("Error fetching URL: {any}\n```\n\n", .{err});
-            } else {
-                try writer.print("Error fetching URL: {any}\n\n", .{err});
+            if (!options.raw) {
+                if (options.markdown) {
+                    try writer.print("Error fetching URL: {any}\n```\n\n", .{err});
+                } else {
+                    try writer.print("Error fetching URL: {any}\n\n", .{err});
+                }
             }
             return;
         };
         defer allocator.free(content);
 
         if (content.len == 0) {
-            if (options.markdown) {
-                try writer.print("[Empty content]\n```\n\n", .{});
-            } else {
-                try writer.print("[Empty content]\n\n", .{});
+            if (!options.raw) {
+                if (options.markdown) {
+                    try writer.print("[Empty content]\n```\n\n", .{});
+                } else {
+                    try writer.print("[Empty content]\n\n", .{});
+                }
             }
         } else {
             const token_count = count_tokens(content);
-            if (options.markdown) {
+            if (options.raw) {
+                try writer.writeAll(content);
+                try writer.writeAll("\n");
+            } else if (options.markdown) {
                 try writer.writeAll(content);
                 try writer.print("\n```\n\n", .{});
             } else {
@@ -407,11 +418,13 @@ fn process_file(
             );
         defer allocator.free(full_path);
 
-        if (options.markdown) {
-            try writer.print("## {s}\n\n", .{full_path});
-            try writer.print("```\n", .{});
-        } else {
-            try writer.print("[ {s} ]\n", .{full_path});
+        if (!options.raw) {
+            if (options.markdown) {
+                try writer.print("## {s}\n\n", .{full_path});
+                try writer.print("```\n", .{});
+            } else {
+                try writer.print("[ {s} ]\n", .{full_path});
+            }
         }
 
         const content = std.fs.cwd().readFileAlloc(
@@ -419,24 +432,31 @@ fn process_file(
             full_path,
             10 * 1024 * 1024,
         ) catch |err| {
-            if (options.markdown) {
-                try writer.print("Error reading file: {any}\n```\n\n", .{err});
-            } else {
-                try writer.print("Error reading file: {any}\n\n", .{err});
+            if (!options.raw) {
+                if (options.markdown) {
+                    try writer.print("Error reading file: {any}\n```\n\n", .{err});
+                } else {
+                    try writer.print("Error reading file: {any}\n\n", .{err});
+                }
             }
             return;
         };
         defer allocator.free(content);
 
         if (content.len == 0) {
-            if (options.markdown) {
-                try writer.print("[Empty file]\n```\n\n", .{});
-            } else {
-                try writer.print("[Empty file]\n\n", .{});
+            if (!options.raw) {
+                if (options.markdown) {
+                    try writer.print("[Empty file]\n```\n\n", .{});
+                } else {
+                    try writer.print("[Empty file]\n\n", .{});
+                }
             }
         } else {
             const token_count = count_tokens(content);
-            if (options.markdown) {
+            if (options.raw) {
+                try writer.writeAll(content);
+                try writer.writeAll("\n");
+            } else if (options.markdown) {
                 try writer.writeAll(content);
                 try writer.print("\n```\n\n", .{});
             } else {
@@ -487,10 +507,12 @@ fn process_targets(
 
     const writer = buffer.writer();
 
-    if (options.markdown) {
-        try writer.writeAll("# Structure\n\n");
-    } else {
-        try writer.writeAll("[ STRUCTURE ]\n");
+    if (!options.raw) {
+        if (options.markdown) {
+            try writer.writeAll("# Structure\n\n");
+        } else {
+            try writer.writeAll("[ STRUCTURE ]\n");
+        }
     }
 
     var tasks = std.ArrayList(FileTask).init(allocator);
@@ -517,10 +539,12 @@ fn process_targets(
                 );
                 defer allocator.free(raw_url);
 
-                if (options.markdown) {
-                    try writer.print("- GitHub: `{s}`\n", .{file_path});
-                } else {
-                    try writer.print("GitHub: {s}\n", .{file_path});
+                if (!options.raw) {
+                    if (options.markdown) {
+                        try writer.print("- GitHub: `{s}`\n", .{file_path});
+                    } else {
+                        try writer.print("GitHub: {s}\n", .{file_path});
+                    }
                 }
                 try tasks.append(.{
                     .path = try allocator.dupe(u8, raw_url),
@@ -533,10 +557,12 @@ fn process_targets(
         } else if (std.mem.startsWith(u8, target, "http://") or
             std.mem.startsWith(u8, target, "https://"))
         {
-            if (options.markdown) {
-                try writer.print("- URL: `{s}`\n", .{target});
-            } else {
-                try writer.print("URL: {s}\n", .{target});
+            if (!options.raw) {
+                if (options.markdown) {
+                    try writer.print("- URL: `{s}`\n", .{target});
+                } else {
+                    try writer.print("URL: {s}\n", .{target});
+                }
             }
             try tasks.append(.{
                 .path = try allocator.dupe(u8, target),
@@ -547,16 +573,18 @@ fn process_targets(
             try tree_list.append(try allocator.dupe(u8, target));
         } else {
             const stat = std.fs.cwd().statFile(target) catch {
-                if (options.markdown) {
-                    try writer.print("- Error accessing: `{s}`\n", .{target});
-                } else {
-                    try writer.print("Error accessing: {s}\n", .{target});
+                if (!options.raw) {
+                    if (options.markdown) {
+                        try writer.print("- Error accessing: `{s}`\n", .{target});
+                    } else {
+                        try writer.print("Error accessing: {s}\n", .{target});
+                    }
                 }
                 continue;
             };
 
             if (stat.kind == .directory) {
-                if (!options.markdown) {
+                if (!options.raw and !options.markdown) {
                     const normalized_target = try normalize_slashes(allocator, target);
                     defer allocator.free(normalized_target);
                     const display_target = if (std.mem.endsWith(u8, normalized_target, "/"))
@@ -600,32 +628,38 @@ fn process_targets(
                             try tree_list.append(try allocator.dupe(u8, entry.path));
                         }
 
-                        const is_dir = entry.kind == .directory;
-                        const raw_display_path = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ target, entry.path, if (is_dir) "/" else "" });
-                        const display_path = try normalize_slashes(allocator, raw_display_path);
-                        defer allocator.free(raw_display_path);
-                        defer allocator.free(display_path);
+                        if (!options.raw) {
+                            const is_dir = entry.kind == .directory;
+                            const raw_display_path = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ target, entry.path, if (is_dir) "/" else "" });
+                            const display_path = try normalize_slashes(allocator, raw_display_path);
+                            defer allocator.free(raw_display_path);
+                            defer allocator.free(display_path);
 
-                        if (options.markdown) {
-                            try writer.print("- `{s}`\n", .{display_path});
-                        } else {
-                            try writer.print("{s}\n", .{display_path});
+                            if (options.markdown) {
+                                try writer.print("- `{s}`\n", .{display_path});
+                            } else {
+                                try writer.print("{s}\n", .{display_path});
+                            }
                         }
                     }
                 }
             } else if (stat.kind == .file) {
                 if (has_unwanted_extension(target)) {
-                    if (options.markdown) {
-                        try writer.print("- [skipped binary] `{s}`\n", .{target});
-                    } else {
-                        try writer.print("[skipped binary] {s}\n", .{target});
+                    if (!options.raw) {
+                        if (options.markdown) {
+                            try writer.print("- [skipped binary] `{s}`\n", .{target});
+                        } else {
+                            try writer.print("[skipped binary] {s}\n", .{target});
+                        }
                     }
                     continue;
                 }
-                if (options.markdown) {
-                    try writer.print("- `{s}`\n", .{target});
-                } else {
-                    try writer.print("{s}\n", .{target});
+                if (!options.raw) {
+                    if (options.markdown) {
+                        try writer.print("- `{s}`\n", .{target});
+                    } else {
+                        try writer.print("{s}\n", .{target});
+                    }
                 }
                 try tasks.append(.{
                     .path = try allocator.dupe(u8, target),
@@ -637,7 +671,9 @@ fn process_targets(
         }
     }
 
-    try writer.writeAll("\n");
+    if (!options.raw) {
+        try writer.writeAll("\n");
+    }
 
     var mutex = Mutex{};
     const thread_count = @min(options.threads, @as(u32, @intCast(tasks.items.len)));
@@ -946,6 +982,8 @@ pub fn main() !void {
                 return;
             } else if (std.mem.eql(u8, arg, "--markdown")) {
                 options.markdown = true;
+            } else if (std.mem.eql(u8, arg, "--raw")) {
+                options.raw = true;
             } else {
                 std.debug.print("Unknown option: {s}\n", .{arg});
                 print_help();
