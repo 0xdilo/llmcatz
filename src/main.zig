@@ -532,7 +532,6 @@ fn process_targets(
 
             for (file_list.items) |file_path| {
                 if (has_unwanted_extension(file_path)) continue;
-                std.debug.print("{s}", .{file_path});
                 const raw_url = try std.fmt.allocPrint(
                     allocator,
                     "https://raw.githubusercontent.com/{s}/{s}/{s}/{s}",
