@@ -53,17 +53,17 @@ const Options = struct {
 
     pub fn init(allocator: std.mem.Allocator) Options {
         return .{
-            .exclude = std.ArrayList([]const u8).init(allocator),
-            .targets = std.ArrayList([]const u8).init(allocator),
+            .exclude = .empty,
+            .targets = .empty,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Options) void {
         for (self.exclude.items) |item| self.allocator.free(item);
-        self.exclude.deinit();
+        self.exclude.deinit(self.allocator);
         for (self.targets.items) |item| self.allocator.free(item);
-        self.targets.deinit();
+        self.targets.deinit(self.allocator);
     }
 };
 
@@ -131,7 +131,7 @@ fn fetch_github_file_list(
     allocator: std.mem.Allocator,
     repo: GitHubRepo,
 ) !std.ArrayList([]const u8) {
-    var files = std.ArrayList([]const u8).init(allocator);
+    var files: std.ArrayList([]const u8) = .empty;
 
     const api_url = try std.fmt.allocPrint(
         allocator,
@@ -163,7 +163,7 @@ fn fetch_github_file_list(
                     if (repo.subdir.len == 0 or
                         std.mem.startsWith(u8, path, repo.subdir))
                     {
-                        try files.append(try allocator.dupe(u8, path));
+                        try files.append(allocator, try allocator.dupe(u8, path));
                     }
                 }
             }
@@ -296,8 +296,8 @@ fn fetch_url(
     var client = http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var response_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer response_buffer.deinit();
 
     const headers = &[_]http.Header{
         .{ .name = "User-Agent", .value = "llmcatz/1.0" },
@@ -307,14 +307,14 @@ fn fetch_url(
         .method = .GET,
         .location = .{ .url = url },
         .extra_headers = headers,
-        .response_storage = .{ .dynamic = &buffer },
+        .response_writer = &response_buffer.writer,
     });
 
     if (response.status != .ok) {
         return error.HttpRequestFailed;
     }
 
-    return try allocator.dupe(u8, buffer.items);
+    return try response_buffer.toOwnedSlice();
 }
 
 fn init_tokenizer(encoding: []const u8) !void {
@@ -348,10 +348,10 @@ fn process_file(
     options: Options,
     file_map: *std.StringHashMap([]const u8),
 ) !void {
-    var local_buffer = std.ArrayList(u8).init(allocator);
-    defer local_buffer.deinit();
+    var local_buffer: std.ArrayList(u8) = .empty;
+    defer local_buffer.deinit(allocator);
 
-    const writer = local_buffer.writer();
+    const writer = local_buffer.writer(allocator);
 
     if (task.is_url) {
         if (!options.raw) {
@@ -399,7 +399,7 @@ fn process_file(
             mutex.lock();
             defer mutex.unlock();
             total_tokens.* += token_count;
-            try buffer.appendSlice(local_buffer.items);
+            try buffer.appendSlice(allocator, local_buffer.items);
             if (options.json) {
                 try file_map.put(
                     try allocator.dupe(u8, task.path),
@@ -411,7 +411,7 @@ fn process_file(
 
         mutex.lock();
         defer mutex.unlock();
-        try buffer.appendSlice(local_buffer.items);
+        try buffer.appendSlice(allocator, local_buffer.items);
     } else {
         const full_path = if (task.is_full_path)
             try allocator.dupe(u8, task.path)
@@ -471,7 +471,7 @@ fn process_file(
             mutex.lock();
             defer mutex.unlock();
             total_tokens.* += token_count;
-            try buffer.appendSlice(local_buffer.items);
+            try buffer.appendSlice(allocator, local_buffer.items);
             if (options.json) {
                 try file_map.put(
                     try allocator.dupe(u8, full_path),
@@ -483,7 +483,7 @@ fn process_file(
 
         mutex.lock();
         defer mutex.unlock();
-        try buffer.appendSlice(local_buffer.items);
+        try buffer.appendSlice(allocator, local_buffer.items);
     }
 }
 
@@ -491,16 +491,16 @@ fn process_targets(
     allocator: std.mem.Allocator,
     options: Options,
 ) !void {
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
 
     var total_tokens: usize = 0;
     var file_count: usize = 0;
 
-    var tree_list = std.ArrayList([]const u8).init(allocator);
+    var tree_list: std.ArrayList([]const u8) = .empty;
     defer {
         for (tree_list.items) |path| allocator.free(path);
-        tree_list.deinit();
+        tree_list.deinit(allocator);
     }
 
     var file_map = std.StringHashMap([]const u8).init(allocator);
@@ -513,7 +513,7 @@ fn process_targets(
         file_map.deinit();
     }
 
-    const writer = buffer.writer();
+    const writer = buffer.writer(allocator);
 
     if (!options.raw) {
         if (options.markdown) {
@@ -523,8 +523,8 @@ fn process_targets(
         }
     }
 
-    var tasks = std.ArrayList(FileTask).init(allocator);
-    defer tasks.deinit();
+    var tasks: std.ArrayList(FileTask) = .empty;
+    defer tasks.deinit(allocator);
 
     for (options.targets.items) |target| {
         if (is_github_url(target)) {
@@ -534,7 +534,7 @@ fn process_targets(
             var file_list = try fetch_github_file_list(allocator, repo);
             defer {
                 for (file_list.items) |f| allocator.free(f);
-                file_list.deinit();
+                file_list.deinit(allocator);
             }
 
             for (file_list.items) |file_path| {
@@ -553,13 +553,13 @@ fn process_targets(
                         try writer.print("GitHub: {s}\n", .{file_path});
                     }
                 }
-                try tasks.append(.{
+                try tasks.append(allocator, .{
                     .path = try allocator.dupe(u8, raw_url),
                     .is_full_path = true,
                     .is_url = true,
                 });
                 file_count += 1;
-                try tree_list.append(try allocator.dupe(u8, file_path));
+                try tree_list.append(allocator, try allocator.dupe(u8,file_path));
             }
         } else if (std.mem.startsWith(u8, target, "http://") or
             std.mem.startsWith(u8, target, "https://"))
@@ -571,13 +571,13 @@ fn process_targets(
                     try writer.print("URL: {s}\n", .{target});
                 }
             }
-            try tasks.append(.{
+            try tasks.append(allocator, .{
                 .path = try allocator.dupe(u8, target),
                 .is_full_path = true,
                 .is_url = true,
             });
             file_count += 1;
-            try tree_list.append(try allocator.dupe(u8, target));
+            try tree_list.append(allocator, try allocator.dupe(u8,target));
         } else {
             const stat = std.fs.cwd().statFile(target) catch {
                 if (!options.raw) {
@@ -626,13 +626,13 @@ fn process_targets(
                         ))
                     {
                         if (entry.kind == .file and !has_unwanted_extension(entry.path)) {
-                            try tasks.append(.{
+                            try tasks.append(allocator, .{
                                 .path = try allocator.dupe(u8, entry.path),
                                 .is_full_path = false,
                                 .target = try allocator.dupe(u8, target),
                             });
                             file_count += 1;
-                            try tree_list.append(try allocator.dupe(u8, entry.path));
+                            try tree_list.append(allocator, try allocator.dupe(u8,entry.path));
                         }
 
                         if (!options.raw) {
@@ -668,12 +668,12 @@ fn process_targets(
                         try writer.print("{s}\n", .{target});
                     }
                 }
-                try tasks.append(.{
+                try tasks.append(allocator, .{
                     .path = try allocator.dupe(u8, target),
                     .is_full_path = true,
                 });
                 file_count += 1;
-                try tree_list.append(try allocator.dupe(u8, target));
+                try tree_list.append(allocator, try allocator.dupe(u8,target));
             }
         }
     }
@@ -756,14 +756,14 @@ fn process_targets(
     }
 
     if (options.json) {
-        var json_buffer = std.ArrayList(u8).init(allocator);
-        defer json_buffer.deinit();
-        const jw = json_buffer.writer();
+        var json_buffer: std.ArrayList(u8) = .empty;
+        defer json_buffer.deinit(allocator);
+        const jw = json_buffer.writer(allocator);
 
         try jw.writeAll("{\n  \"tree\": [\n");
         for (tree_list.items, 0..) |path, idx| {
             try jw.writeAll("    ");
-            try std.json.stringify(path, .{}, jw);
+            try jw.print("{f}", .{std.json.fmt(path, .{})});
             try jw.print("{s}\n", .{
                 if (idx + 1 == tree_list.items.len) "" else ",",
             });
@@ -774,9 +774,9 @@ fn process_targets(
         var it = file_map.iterator();
         while (it.next()) |entry| {
             try jw.writeAll(",\n  ");
-            try std.json.stringify(entry.key_ptr.*, .{}, jw);
+            try jw.print("{f}", .{std.json.fmt(entry.key_ptr.*, .{})});
             try jw.writeAll(": ");
-            try std.json.stringify(entry.value_ptr.*, .{}, jw);
+            try jw.print("{f}", .{std.json.fmt(entry.value_ptr.*, .{})});
         }
         try jw.writeAll("\n}\n");
 
@@ -837,9 +837,9 @@ fn process_targets(
         , .{ output_path, total_tokens });
     } else if (!options.print) {
         try copy_to_clipboard(allocator, buffer.items);
-        var recap = std.ArrayList(u8).init(allocator);
-        defer recap.deinit();
-        const recap_writer = recap.writer();
+        var recap: std.ArrayList(u8) = .empty;
+        defer recap.deinit(allocator);
+        const recap_writer = recap.writer(allocator);
         try recap_writer.print(
             \\
             \\      |\      _,,,---,,_
@@ -857,11 +857,11 @@ fn process_targets(
 }
 
 fn run_fzf(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
-    var targets = std.ArrayList([]const u8).init(allocator);
-    var file_list = std.ArrayList([]const u8).init(allocator);
+    var targets: std.ArrayList([]const u8) = .empty;
+    var file_list: std.ArrayList([]const u8) = .empty;
     defer {
         for (file_list.items) |path| allocator.free(path);
-        file_list.deinit();
+        file_list.deinit(allocator);
     }
 
     var dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
@@ -870,13 +870,13 @@ fn run_fzf(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
     defer walker.deinit();
     while (try walker.next()) |entry| {
         if (entry.kind == .file) {
-            try file_list.append(try allocator.dupe(u8, entry.path));
+            try file_list.append(allocator, try allocator.dupe(u8, entry.path));
         }
     }
 
-    var fzf_input = std.ArrayList(u8).init(allocator);
-    defer fzf_input.deinit();
-    const writer = fzf_input.writer();
+    var fzf_input: std.ArrayList(u8) = .empty;
+    defer fzf_input.deinit(allocator);
+    const writer = fzf_input.writer(allocator);
     for (file_list.items) |file| {
         try writer.print("{s}\n", .{file});
     }
@@ -911,21 +911,21 @@ fn run_fzf(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
         fzf_process.stdin = null;
     }
 
-    var selected_files = std.ArrayList(u8).init(allocator);
-    defer selected_files.deinit();
-    if (fzf_process.stdout) |stdout| {
-        try stdout.reader().readAllArrayList(&selected_files, 1024 * 1024);
-    }
+    const selected_files = if (fzf_process.stdout) |stdout|
+        try stdout.readToEndAlloc(allocator, 1024 * 1024)
+    else
+        "";
+    defer if (selected_files.len > 0) allocator.free(selected_files);
 
     const term = try fzf_process.wait();
     if (term != .Exited or term.Exited != 0) return error.FzfFailed;
 
-    var lines = std.mem.splitScalar(u8, selected_files.items, '\n');
+    var lines = std.mem.splitScalar(u8, selected_files, '\n');
     while (lines.next()) |line| {
         if (line.len > 0) {
             const trimmed = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len > 0)
-                try targets.append(try allocator.dupe(u8, trimmed));
+                try targets.append(allocator, try allocator.dupe(u8, trimmed));
         }
     }
     return targets;
@@ -962,7 +962,7 @@ pub fn main() !void {
                 i += 1;
                 if (i >= args.len) return error.MissingValue;
                 const normalized = try normalize_slashes(allocator, args[i]);
-                try options.exclude.append(normalized);
+                try options.exclude.append(allocator, normalized);
             } else if (std.mem.eql(u8, arg, "-t") or
                 std.mem.eql(u8, arg, "--threads"))
             {
@@ -998,7 +998,7 @@ pub fn main() !void {
                 return error.UnknownOption;
             }
         } else {
-            try options.targets.append(try allocator.dupe(u8, arg));
+            try options.targets.append(allocator, try allocator.dupe(u8, arg));
         }
     }
 
@@ -1009,7 +1009,7 @@ pub fn main() !void {
         var fzf_targets = try run_fzf(allocator);
         defer {
             for (fzf_targets.items) |path| allocator.free(path);
-            fzf_targets.deinit();
+            fzf_targets.deinit(allocator);
         }
         if (fzf_targets.items.len == 0) {
             std.debug.print("No files selected.\n", .{});
@@ -1017,7 +1017,7 @@ pub fn main() !void {
             return;
         }
         for (fzf_targets.items) |path| {
-            try options.targets.append(try allocator.dupe(u8, path));
+            try options.targets.append(allocator, try allocator.dupe(u8, path));
         }
     }
 
@@ -1033,19 +1033,19 @@ fn normalize_slashes(
     allocator: std.mem.Allocator,
     path: []const u8,
 ) ![]const u8 {
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(allocator);
     var last_was_slash = false;
     for (path) |char| {
         if (char == '/') {
-            if (!last_was_slash) try result.append(char);
+            if (!last_was_slash) try result.append(allocator, char);
             last_was_slash = true;
         } else {
-            try result.append(char);
+            try result.append(allocator, char);
             last_was_slash = false;
         }
     }
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 fn has_unwanted_extension(path: []const u8) bool {
     const dot_pos = std.mem.lastIndexOfScalar(u8, path, '.') orelse return false;
